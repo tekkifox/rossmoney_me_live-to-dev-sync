@@ -89,10 +89,10 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Join the tailnet
-        uses: tailscale/github-action@v3
+        uses: tailscale/github-action@v4
         with:
           authkey: ${{ secrets.TS_AUTHKEY }}
-          args: --hostname=gh-dev-sync-${{ github.run_id }}
+          hostname: gh-dev-sync-${{ github.run_id }}
 
       - name: Deploy Portainer stack
         env:
