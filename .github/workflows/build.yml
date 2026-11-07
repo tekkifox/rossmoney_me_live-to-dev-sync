@@ -5,6 +5,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: build
+  cancel-in-progress: false
+
 permissions:
   contents: read
   packages: write
@@ -52,7 +56,7 @@ jobs:
           {
             echo "### Image digest"
             echo
-            echo '`${{ steps.build.outputs.digest }}`'
+            echo "\`${{ steps.build.outputs.digest }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Smoke test image
@@ -165,20 +169,38 @@ jobs:
             '{StackFileContent: $stackfile, Env: .Env, PullImage: true}' \
             "$tmp/stack.json" > "$tmp/payload.json"
 
-          code=$(curl -ksS -X PUT \
-            -H "X-API-Key: $PORTAINER_API_KEY" \
-            -H 'Content-Type: application/json' \
-            --data-binary @"$tmp/payload.json" \
-            -o "$tmp/deploy.json" -w '%{http_code}' \
-            "$PORTAINER_URL/api/stacks/$stack_id?endpointId=$endpoint_id") || {
-            echo "PUT /api/stacks/$stack_id failed" >&2
-            exit 1
-          }
-          if [ "$code" -lt 200 ] || [ "$code" -ge 300 ]; then
+          max_attempts=3
+          retry_delays=(15 45)
+          attempt=1
+          while :; do
+            code=$(curl -ksS -X PUT \
+              -H "X-API-Key: $PORTAINER_API_KEY" \
+              -H 'Content-Type: application/json' \
+              --data-binary @"$tmp/payload.json" \
+              -o "$tmp/deploy.json" -w '%{http_code}' \
+              "$PORTAINER_URL/api/stacks/$stack_id?endpointId=$endpoint_id") || {
+              echo "PUT /api/stacks/$stack_id failed" >&2
+              exit 1
+            }
+            echo "PUT /api/stacks/$stack_id attempt $attempt/$max_attempts returned HTTP $code"
+
+            if [ "$code" -ge 200 ] && [ "$code" -lt 300 ]; then
+              break
+            fi
+            if [ "$code" -eq 409 ] || { [ "$code" -ge 500 ] && [ "$code" -lt 600 ]; }; then
+              if [ "$attempt" -lt "$max_attempts" ]; then
+                delay=${retry_delays[$((attempt - 1))]}
+                echo "retrying in ${delay}s after HTTP $code" >&2
+                sleep "$delay"
+                attempt=$((attempt + 1))
+                continue
+              fi
+            fi
+
             echo "PUT /api/stacks/$stack_id returned HTTP $code" >&2
             cat "$tmp/deploy.json" >&2
             exit 1
-          fi
+          done
 
           echo "deployed stack $STACK_NAME (id $stack_id)" \
             "on endpoint $endpoint_id"
