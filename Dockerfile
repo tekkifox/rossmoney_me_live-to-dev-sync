@@ -65,8 +65,9 @@ RUN apt-get update \
       util-linux \
  && rm -rf /var/lib/apt/lists/*
 
-# Named volumes are mounted over these directories in the stack. Creating them
-# here gives a fresh volume root:root ownership and 0755 permissions.
+# The stack bind-mounts host directories over these paths. Creating them here
+# gives a usable root-owned directory (0755) when the image runs without
+# mounts, or when a host directory is still empty.
 RUN install -d -m 0755 -o root -g root \
       /var/lib/rosso-dev-sync/work \
       /var/log/rosso-dev-sync

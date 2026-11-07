@@ -251,7 +251,7 @@ mongo_import() {
   mongoimport --uri "$uri" --db "$db" --collection "$coll" --file "$file" --jsonArray --quiet
 }
 
-# WORK_DIR is a named volume in the stack, so it is a mount point; clear its
+# WORK_DIR is a bind mount in the stack, so it is a mount point; clear its
 # contents instead of removing the directory.
 clear_work_dir() {
   [ -d "$WORK_DIR" ] || return 0
@@ -339,7 +339,9 @@ done
 
 # The dev admin password is the same for every target. Payload stores a random
 # salt plus a pbkdf2-sha256 (600k rounds, 32 bytes) hash in its
-# `pbkdf2-sha256-v1:` form.
+# `pbkdf2-sha256-v1:` form. Without that prefix Payload reads the bare digest as
+# its legacy format and the password never verifies.
+DEV_HASH_PREFIX=pbkdf2-sha256-v1:
 DEV_SALT=$(openssl rand -hex 32) || fail "cannot generate the dev admin salt"
 PASS_HEX=$(printf '%s' "$DEV_ADMIN_PASSWORD" | od -An -v -tx1 | tr -d ' \n') \
   || fail "cannot encode the dev admin password"
@@ -352,6 +354,7 @@ DEV_HASH=$(openssl kdf -keylen 32 -kdfopt digest:SHA256 \
 case "$DEV_HASH" in
   *[!0-9a-f]*) fail "unexpected dev admin hash" ;;
 esac
+DEV_HASH="$DEV_HASH_PREFIX$DEV_HASH"
 DEV_EMAIL_JSON=$(printf '%s' "$DEV_ADMIN_EMAIL" | jq -Rs .) \
   || fail "cannot encode the dev admin email"
 
@@ -618,16 +621,36 @@ const r = d.users.updateOne(
   },
   { upsert: true }
 );
+const u = d.users.findOne({ email: email });
 print(JSON.stringify({
   matched: r.matchedCount,
   modified: r.modifiedCount,
   upserted: r.upsertedCount,
-  admins: d.users.countDocuments({ email: email })
+  admins: d.users.countDocuments({ email: email }),
+  salt: u && u.salt,
+  hash: u && u.hash
 }));
 ") || fail "cannot set the dev admin"
   ADMINS=$(printf '%s' "$ADMIN_RESULT" | jq -er '.admins') \
     || fail "unexpected dev admin stats: $ADMIN_RESULT"
   [ "$ADMINS" -eq 1 ] || fail "dev admin $DEV_ADMIN_EMAIL is missing after the swap"
+  STORED_SALT=$(printf '%s' "$ADMIN_RESULT" | jq -er '.salt') \
+    || fail "cannot read the stored dev admin salt"
+  STORED_HASH=$(printf '%s' "$ADMIN_RESULT" | jq -er '.hash') \
+    || fail "cannot read the stored dev admin hash"
+  case "$STORED_HASH" in
+    "$DEV_HASH_PREFIX"*) ;;
+    *) fail "stored dev admin hash is missing the $DEV_HASH_PREFIX prefix" ;;
+  esac
+  # Re-derive the digest from the stored salt and the configured password, so a
+  # hash that is well-formed but wrong still fails the target.
+  STORED_SALT_HEX=$(printf '%s' "$STORED_SALT" | od -An -v -tx1 | tr -d ' \n') \
+    || fail "cannot encode the stored dev admin salt"
+  VERIFIED_HASH=$(openssl kdf -keylen 32 -kdfopt digest:SHA256 \
+    -kdfopt "hexpass:$PASS_HEX" -kdfopt "hexsalt:$STORED_SALT_HEX" -kdfopt iter:600000 PBKDF2 \
+    | tr -d ':\n' | tr 'A-F' 'a-f') || fail "cannot verify the dev admin password"
+  [ "$STORED_HASH" = "$DEV_HASH_PREFIX$VERIFIED_HASH" ] \
+    || fail "stored dev admin hash does not match the configured password"
 
   # 6. Cosmetic: ask the site to materialise the imported media rows as blob
   #    objects. A warning here does not fail the refresh.
@@ -663,7 +686,7 @@ for i in "${!ACTIVE_NAMES[@]}"; do
     "${ACTIVE_LEGACY_STAGINGS[$i]}" "${ACTIVE_MEDIA_DIRS[$i]}" "${ACTIVE_CMS_URLS[$i]}"
 done
 
-# 9. Clear the shared work volume and report one line naming every target.
+# 9. Clear the shared work directory and report one line naming every target.
 clear_work_dir
 
 LINE="OK"
