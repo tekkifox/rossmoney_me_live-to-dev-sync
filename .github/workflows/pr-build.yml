@@ -18,9 +18,28 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Build
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           push: false
+          load: true
+          tags: live-to-dev-sync:pr
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Smoke test image
+        run: |
+          set -euo pipefail
+          IMAGE=live-to-dev-sync:pr
+          docker run --rm "$IMAGE" sh -c \
+            'command -v curl; curl --version | head -n 1'
+          docker run --rm "$IMAGE" sh -c \
+            'curl --version | head -n 1 | grep -q "^curl 8\.10\.1"'
+          docker run --rm "$IMAGE" mongosh --version
+          docker run --rm "$IMAGE" mongoimport --version
+          URL=https://www.rossmoney.me/
+          code=$(docker run --rm "$IMAGE" sh -c \
+            'curl -fsSL -o /dev/null -w "%{http_code}" "$1"' _ "$URL")
+          echo "anonymous HTTPS health check: HTTP $code"
+          [ "$code" = 200 ]
