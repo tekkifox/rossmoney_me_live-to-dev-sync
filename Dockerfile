@@ -65,6 +65,12 @@ RUN apt-get update \
       util-linux \
  && rm -rf /var/lib/apt/lists/*
 
+# Named volumes are mounted over these directories in the stack. Creating them
+# here gives a fresh volume root:root ownership and 0755 permissions.
+RUN install -d -m 0755 -o root -g root \
+      /var/lib/rosso-dev-sync/work \
+      /var/log/rosso-dev-sync
+
 COPY --from=curl-build /tmp/curl/src/curl /usr/local/bin/curl
 ENV PATH=/usr/local/bin:$PATH
 
