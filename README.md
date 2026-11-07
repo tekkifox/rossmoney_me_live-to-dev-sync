@@ -58,8 +58,10 @@ service signs in with, is untouched.
 
 The media mirror downloads into a temporary directory first. The live
 `/media` directory is replaced only after every file has arrived, so a failed
-download leaves the previous media in place. A manifest is written next to the
-media directory (`<media dir>.manifest.json`).
+download leaves the previous media in place. When `/media` is a volume mount
+point, its contents are replaced in place after the downloads have succeeded.
+A manifest is written next to the media directory
+(`<media dir>.manifest.json`).
 
 The CMS media backfill is cosmetic. When a target has `<NAME>_CMS_URL`, the
 script logs in with `POST $CMS_URL/api/users/login` using the dev admin

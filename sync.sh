@@ -202,7 +202,7 @@ done
 
 [ "${#ACTIVE_NAMES[@]}" -gt 0 ] || fail "no sync targets configured"
 
-for cmd in curl tar gzip jq flock mongosh mongoimport openssl od stat find sort; do
+for cmd in curl tar gzip jq flock mountpoint mongosh mongoimport openssl od stat find sort; do
   command -v "$cmd" >/dev/null 2>&1 || fail "missing command: $cmd"
 done
 
@@ -289,6 +289,36 @@ esac
 DEV_EMAIL_JSON=$(printf '%s' "$DEV_ADMIN_EMAIL" | jq -Rs .) \
   || fail "cannot encode the dev admin email"
 
+# Replace the contents of a media directory that is a mount point. A mount
+# point cannot be renamed, so move the old entries aside and move the fully
+# downloaded set into place; restore the old set if the install fails.
+install_media_in_place() {
+  local media_dir=$1
+  local tmp=$2
+  local prev="$media_dir/.sync-prev.$$"
+  local tmp_name=${tmp##*/}
+  local prev_name=${prev##*/}
+  local entry
+
+  rm -rf "$prev"
+  mkdir "$prev" || fail "cannot create $prev"
+  while IFS= read -r -d '' entry; do
+    mv "$entry" "$prev/" || fail "cannot move the previous media files aside"
+  done < <(find "$media_dir" -mindepth 1 -maxdepth 1 \
+    ! -name "$tmp_name" ! -name "$prev_name" -print0)
+
+  while IFS= read -r -d '' entry; do
+    if ! mv "$entry" "$media_dir/"; then
+      while IFS= read -r -d '' entry; do
+        mv "$entry" "$media_dir/" || true
+      done < <(find "$prev" -mindepth 1 -maxdepth 1 -print0)
+      fail "cannot install the new media files"
+    fi
+  done < <(find "$tmp" -mindepth 1 -maxdepth 1 -print0)
+
+  rm -rf "$prev" "$tmp"
+}
+
 # Mirror the media files the refreshed media collection references. The live
 # directory is replaced only after every download has succeeded.
 mirror_media() {
@@ -317,6 +347,9 @@ print(JSON.stringify(Array.from(names).sort()));
   MEDIA_COUNT=$(jq 'length' "$media_list")
 
   MEDIA_TMP="${media_dir}.tmp.$$"
+  if mountpoint -q "$media_dir"; then
+    MEDIA_TMP="$media_dir/.sync-tmp.$$"
+  fi
   rm -rf "$MEDIA_TMP"
   mkdir -p "$MEDIA_TMP" || fail "cannot create $MEDIA_TMP"
   while IFS= read -r -d '' file; do
@@ -335,20 +368,24 @@ print(JSON.stringify(Array.from(names).sort()));
   [ "$GOT" -eq "$MEDIA_COUNT" ] \
     || fail "downloaded $GOT media files, expected $MEDIA_COUNT"
 
-  # Swap the whole directory only after every download has succeeded. If the
-  # install fails, put the previous directory back.
-  if [ -d "$media_dir" ]; then
-    rm -rf "$media_dir.prev"
-    mv "$media_dir" "$media_dir.prev" || fail "cannot move the previous media directory aside"
-  fi
-  if ! mv "$MEDIA_TMP" "$media_dir"; then
-    if [ -d "$media_dir.prev" ]; then
-      mv "$media_dir.prev" "$media_dir" || true
+  # Swap the whole directory only after every download has succeeded. A mount
+  # point (the usual case for the /media volume) is replaced in place instead.
+  if mountpoint -q "$media_dir"; then
+    install_media_in_place "$media_dir" "$MEDIA_TMP"
+  else
+    if [ -d "$media_dir" ]; then
+      rm -rf "$media_dir.prev"
+      mv "$media_dir" "$media_dir.prev" || fail "cannot move the previous media directory aside"
     fi
-    fail "cannot install the new media directory"
+    if ! mv "$MEDIA_TMP" "$media_dir"; then
+      if [ -d "$media_dir.prev" ]; then
+        mv "$media_dir.prev" "$media_dir" || true
+      fi
+      fail "cannot install the new media directory"
+    fi
+    rm -rf "$media_dir.prev"
   fi
   MEDIA_TMP=""
-  rm -rf "$media_dir.prev"
   chmod 755 "$media_dir"
   find "$media_dir" -type f -exec chmod 644 {} +
 
