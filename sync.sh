@@ -32,6 +32,7 @@ LOCK=${LOCK:-/run/rosso-dev-sync.lock}
 START=$SECONDS
 ARCHIVE_KEY=""
 ARCHIVE=""
+LIST_BODY=""
 MEDIA_TMP=""
 MANIFEST_TMP=""
 CURRENT_TARGET=""
@@ -47,6 +48,9 @@ fail() {
 }
 
 cleanup() {
+  if [ -n "$LIST_BODY" ] && [ -f "$LIST_BODY" ]; then
+    rm -f "$LIST_BODY" || true
+  fi
   if [ -n "$MEDIA_TMP" ] && [ -d "$MEDIA_TMP" ]; then
     rm -rf "$MEDIA_TMP" || true
   fi
@@ -202,7 +206,7 @@ done
 
 [ "${#ACTIVE_NAMES[@]}" -gt 0 ] || fail "no sync targets configured"
 
-for cmd in curl tar gzip jq flock mountpoint mongosh mongoimport openssl od stat find sort; do
+for cmd in curl tar gzip jq flock mountpoint mongosh mongoimport openssl od stat find sort mktemp head; do
   command -v "$cmd" >/dev/null 2>&1 || fail "missing command: $cmd"
 done
 
@@ -227,12 +231,27 @@ s3_curl() {
   ak=${ak//\"/\\\"}
   sk=${sk//\"/\\\"}
   printf 'user = "%s:%s"\n' "$ak" "$sk" |
-    curl -fsS -K - --aws-sigv4 "aws:amz:us-east-1:s3" "$@"
+    curl -sS -K - --aws-sigv4 "aws:amz:us-east-1:s3" "$@"
 }
 
 # 1. Find the newest dump.
-LIST_XML=$(s3_curl --max-time 60 "$S3_ENDPOINT/$S3_BUCKET?list-type=2&prefix=$ARCHIVE_PREFIX") \
-  || fail "cannot list s3://$S3_BUCKET"
+LIST_BODY=$(mktemp) || fail "cannot create a temporary file for the S3 listing"
+LIST_CODE=$(s3_curl --max-time 60 -o "$LIST_BODY" -w '%{http_code}' \
+  "$S3_ENDPOINT/$S3_BUCKET?list-type=2&prefix=$ARCHIVE_PREFIX") || {
+  rm -f "$LIST_BODY"
+  LIST_BODY=""
+  fail "cannot list s3://$S3_BUCKET (request failed)"
+}
+if [ "$LIST_CODE" -lt 200 ] || [ "$LIST_CODE" -ge 300 ]; then
+  FIRST_LINE=$(head -n 1 "$LIST_BODY" 2>/dev/null | tr -d '\r' || true)
+  [ -n "$FIRST_LINE" ] || FIRST_LINE="(empty body)"
+  rm -f "$LIST_BODY"
+  LIST_BODY=""
+  fail "cannot list s3://$S3_BUCKET (HTTP $LIST_CODE: $FIRST_LINE)"
+fi
+LIST_XML=$(cat "$LIST_BODY")
+rm -f "$LIST_BODY"
+LIST_BODY=""
 ARCHIVE_KEY=$(printf '%s\n' "$LIST_XML" \
   | grep -o '<Key>[^<]*</Key>' \
   | sed -E 's#</?Key>##g' \
@@ -246,8 +265,17 @@ rm -rf "$WORK_DIR"
 mkdir -p "$WORK_DIR/dump"
 chmod 700 "$WORK_DIR"
 ARCHIVE="$WORK_DIR/$ARCHIVE_KEY"
-s3_curl --max-time 300 -o "$ARCHIVE" "$S3_ENDPOINT/$S3_BUCKET/$ARCHIVE_KEY" \
-  || fail "download failed for $ARCHIVE_KEY"
+DL_CODE=$(s3_curl --max-time 300 -o "$ARCHIVE" -w '%{http_code}' \
+  "$S3_ENDPOINT/$S3_BUCKET/$ARCHIVE_KEY") || {
+  rm -f "$ARCHIVE"
+  fail "download failed for $ARCHIVE_KEY (request failed)"
+}
+if [ "$DL_CODE" -lt 200 ] || [ "$DL_CODE" -ge 300 ]; then
+  FIRST_LINE=$(head -n 1 "$ARCHIVE" 2>/dev/null | tr -d '\r' || true)
+  [ -n "$FIRST_LINE" ] || FIRST_LINE="(empty body)"
+  rm -f "$ARCHIVE"
+  fail "download failed for $ARCHIVE_KEY (HTTP $DL_CODE: $FIRST_LINE)"
+fi
 chmod 600 "$ARCHIVE"
 
 tar -xzf "$ARCHIVE" -C "$WORK_DIR/dump" || fail "cannot extract $ARCHIVE_KEY"
