@@ -82,6 +82,13 @@ A failure exits non-zero and prints one line naming the target and step:
 FAILED: atlas: import failed for posts
 ```
 
+If the S3 listing fails, the line also carries the HTTP status and the first
+line of the response body, for example:
+
+```text
+FAILED: cannot list s3://example-dumps (HTTP 403: <Error><Code>SignatureDoesNotMatch</Code></Error>)
+```
+
 Targets are processed in order and a failure stops the run. A target that
 already completed stays complete, a target that has not started is untouched,
 and no target is rolled back or copied over another target.
@@ -142,6 +149,14 @@ how the deployment is wired.
 `DEV_ADMIN_PASSWORD` are secrets.
 
 ## Build
+
+The image is based on `mongo:7`, but it carries curl `8.10.1` built from the
+official curl source in a builder stage, ahead of the base image's curl `7.81.0`.
+The older curl mishandles `--aws-sigv4` with a query string, which turns an S3
+listing into `SignatureDoesNotMatch`; the Mongo tooling is unchanged. The build
+asserts `curl --version`, and the image smoke test checks `curl`, `mongosh`,
+`mongoimport`, and an anonymous HTTPS request. The signed S3 listing needs the
+stack credentials, so it is not run in CI.
 
 The image is built and published by `.github/workflows/build.yml` on a
 GitHub-hosted `ubuntu-latest` runner. A push to `main` or a manual
