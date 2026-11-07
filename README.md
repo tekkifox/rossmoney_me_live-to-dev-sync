@@ -129,6 +129,10 @@ publishes:
 - `ghcr.io/tekkifox/rossmoney_me_live-to-dev-sync:latest`
 - `ghcr.io/tekkifox/rossmoney_me_live-to-dev-sync:sha-<short sha>`
 
+Pull requests also build the image as a check. A same-repository pull request
+pushes only its short-SHA tag; `latest` is enabled only on the default branch.
+Fork pull requests build without pushing.
+
 To build locally where a Docker daemon is available:
 
 ```console
