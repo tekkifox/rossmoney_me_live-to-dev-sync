@@ -36,10 +36,12 @@ jobs:
             'command -v curl; curl --version | head -n 1'
           docker run --rm "$IMAGE" sh -c \
             'curl --version | head -n 1 | grep -q "^curl 8\.10\.1"'
+          W=/var/lib/rosso-dev-sync/work
+          L=/var/log/rosso-dev-sync
           docker run --rm "$IMAGE" sh -c \
-            'test "$(stat -c "%U:%G:%a" /var/lib/rosso-dev-sync/work)" = "root:root:755"'
+            'stat -c "%U:%G:%a" "$1" | grep -qx "root:root:755"' _ "$W"
           docker run --rm "$IMAGE" sh -c \
-            'test "$(stat -c "%U:%G:%a" /var/log/rosso-dev-sync)" = "root:root:755"'
+            'stat -c "%U:%G:%a" "$1" | grep -qx "root:root:755"' _ "$L"
           docker run --rm "$IMAGE" mongosh --version
           docker run --rm "$IMAGE" mongoimport --version
           URL=https://www.rossmoney.me/
