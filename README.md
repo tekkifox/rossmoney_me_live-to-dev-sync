@@ -148,7 +148,8 @@ GitHub-hosted `ubuntu-latest` runner. A push to `main` or a manual
 - `ghcr.io/tekkifox/rossmoney_me_live-to-dev-sync:sha-<short sha>`
 
 The build uses the `gha` cache (`cache-from`/`cache-to`), so rebuilds do not
-depend on a warm host.
+depend on a warm host. A separate `pr-build.yml` workflow builds the image on
+pull requests without pushing it, so PR checks do not move any image tags.
 
 To build locally where a Docker daemon is available:
 
