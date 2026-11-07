@@ -20,7 +20,7 @@ RUN apt-get update \
       util-linux \
  && rm -rf /var/lib/apt/lists/*
 
-COPY --from=curl /usr/local/bin/curl /usr/local/bin/curl
+COPY --from=curl /usr/bin/curl /usr/local/bin/curl
 ENV PATH=/usr/local/bin:$PATH
 
 RUN test "$(command -v curl)" = "/usr/local/bin/curl" \
