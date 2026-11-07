@@ -91,8 +91,9 @@ for cmd in curl tar gzip jq flock docker node stat; do
 done
 docker inspect "$MONGO_CONTAINER" >/dev/null 2>&1 || fail "container $MONGO_CONTAINER is not running"
 
-# The shared server is published on 172.18.0.1; from inside its own container
-# it is 127.0.0.1. Rewrite only the authority, keeping credentials and options.
+# The shared server sits behind the host's docker bridge; from inside the
+# database container it is loopback. Rewrite only the authority, keeping
+# credentials and options.
 MONGODB_URI=$(node -e 'const u = new URL(process.env.MONGODB_URI); u.host = "127.0.0.1:27017"; process.stdout.write(u.toString())') \
   || fail "cannot parse MONGODB_URI"
 export MONGODB_URI
