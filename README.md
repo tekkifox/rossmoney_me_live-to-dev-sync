@@ -16,7 +16,7 @@ container. The reference behaviour is kept in
 | Target | Database | Media mirror | CMS media backfill |
 | --- | --- | --- | --- |
 | `local` | `rossmoney_dev`, the screenshot service's database | yes, into `/media` | only when `LOCAL_CMS_URL` is set |
-| `atlas` | `rossmoney_me_dev`, what `dev.rossmoney.me` reads | no | only when `ATLAS_CMS_URL` is set |
+| `atlas` | `rossmoney_me_dev`, the Atlas dev site's database | no | only when `ATLAS_CMS_URL` is set |
 
 Each target reads `<NAME>_MONGODB_URI`, `<NAME>_TARGET_DB`,
 `<NAME>_STAGING_DB`, optionally `<NAME>_MEDIA_DIR`, and optionally
@@ -130,10 +130,11 @@ in this repository or in the image.
 | `ATLAS_MEDIA_DIR` | unset | unset | Optional; Atlas has no media mirror |
 | `ATLAS_CMS_URL` | unset | `https://dev.example.com` | Optional base URL for the media backfill; unset skips it |
 
-The Atlas URI must use the `mongodb+srv` shape. `mongodb+srv` resolves the
+The Atlas deployment uses the `mongodb+srv` shape. `mongodb+srv` resolves the
 cluster through DNS and uses TLS by default, so the image includes
-`ca-certificates`; the script makes no IPv4-only assumptions. A standard
-`mongodb://` URI also works for a local or Atlas target when needed.
+`ca-certificates`; the script makes no IPv4-only assumptions. The script also
+accepts a standard `mongodb://` URI for a local or Atlas target when that is
+how the deployment is wired.
 
 `LOCAL_MONGODB_URI`, `ATLAS_MONGODB_URI`, `AWS_SECRET_ACCESS_KEY`, and
 `DEV_ADMIN_PASSWORD` are secrets.
