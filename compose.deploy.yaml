@@ -7,11 +7,13 @@ services:
       SYNC_TARGETS: ${SYNC_TARGETS:-}
       LOCAL_MONGODB_URI: ${LOCAL_MONGODB_URI:-}
       LOCAL_TARGET_DB: ${LOCAL_TARGET_DB:-}
+      # Legacy cleanup only; staging now happens inside the target DB.
       LOCAL_STAGING_DB: ${LOCAL_STAGING_DB:-}
       LOCAL_MEDIA_DIR: /media
       LOCAL_CMS_URL: ${LOCAL_CMS_URL:-}
       ATLAS_MONGODB_URI: ${ATLAS_MONGODB_URI:-}
       ATLAS_TARGET_DB: ${ATLAS_TARGET_DB:-}
+      # Legacy cleanup only; staging now happens inside the target DB.
       ATLAS_STAGING_DB: ${ATLAS_STAGING_DB:-}
       ATLAS_CMS_URL: ${ATLAS_CMS_URL:-}
       S3_ENDPOINT: ${S3_ENDPOINT:-}
@@ -24,6 +26,12 @@ services:
       TZ: UTC
     volumes:
       - ${MEDIA_HOST_PATH:-}:/media
+      - work:/var/lib/rosso-dev-sync/work
+      - logs:/var/log/rosso-dev-sync
+
+volumes:
+  work:
+  logs:
 
 networks:
   default:

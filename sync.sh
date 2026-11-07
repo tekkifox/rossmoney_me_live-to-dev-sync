@@ -36,6 +36,9 @@ LIST_BODY=""
 MEDIA_TMP=""
 MANIFEST_TMP=""
 CURRENT_TARGET=""
+CURRENT_URI=""
+CURRENT_TARGET_DB=""
+CURRENT_LEGACY_STAGING=""
 TARGET_SEGMENTS=()
 
 fail() {
@@ -45,6 +48,24 @@ fail() {
     echo "FAILED: $*" >&2
   fi
   exit 1
+}
+
+cleanup_staging() {
+  local uri=${CURRENT_URI:-}
+  local db=${CURRENT_TARGET_DB:-}
+  local legacy=${CURRENT_LEGACY_STAGING:-}
+  [ -n "$uri" ] && [ -n "$db" ] || return 0
+
+  timeout 20s mongosh "$uri" --quiet --eval "
+const d = db.getSiblingDB('$db');
+for (const c of d.getCollectionNames()) {
+  if (c.startsWith('__staging_')) d.getCollection(c).drop();
+}
+" >/dev/null 2>&1 || true
+  if [ -n "$legacy" ] && [ "$legacy" != "$db" ]; then
+    timeout 20s mongosh "$uri" --quiet --eval \
+      "db.getSiblingDB('$legacy').dropDatabase()" >/dev/null 2>&1 || true
+  fi
 }
 
 cleanup() {
@@ -57,6 +78,7 @@ cleanup() {
   if [ -n "$MANIFEST_TMP" ] && [ -f "$MANIFEST_TMP" ]; then
     rm -f "$MANIFEST_TMP" || true
   fi
+  cleanup_staging
 }
 
 trap cleanup EXIT
@@ -121,7 +143,7 @@ read -r -a TARGET_NAMES <<<"$SYNC_TARGETS"
 ACTIVE_NAMES=()
 ACTIVE_URIS=()
 ACTIVE_DBS=()
-ACTIVE_STAGINGS=()
+ACTIVE_LEGACY_STAGINGS=()
 ACTIVE_MEDIA_DIRS=()
 ACTIVE_CMS_URLS=()
 declare -A SEEN_TARGET=()
@@ -151,8 +173,8 @@ for name in "${TARGET_NAMES[@]}"; do
 
   target_var="${prefix}_TARGET_DB"
   target_db="${!target_var:-}"
-  staging_var="${prefix}_STAGING_DB"
-  staging_db="${!staging_var:-}"
+  legacy_staging_var="${prefix}_STAGING_DB"
+  legacy_staging_db="${!legacy_staging_var:-}"
   media_var="${prefix}_MEDIA_DIR"
   media_dir=""
   if [ -v "$media_var" ]; then
@@ -172,18 +194,23 @@ for name in "${TARGET_NAMES[@]}"; do
 
   if [ "$name" = local ]; then
     target_db=${target_db:-rossmoney_dev}
-    staging_db=${staging_db:-rossmoney_dev_staging}
+    legacy_staging_db=${legacy_staging_db:-rossmoney_dev_staging}
   fi
   [ -n "$target_db" ] || fail "missing $target_var"
-  [ -n "$staging_db" ] || fail "missing $staging_var"
-  [ "$staging_db" != "$target_db" ] || fail "STAGING_DB and TARGET_DB must differ"
-  for db in "$staging_db" "$target_db"; do
-    case "$db" in
+  case "$target_db" in
+    ''|*[!A-Za-z0-9_-]*|admin|local|config)
+      fail "unsafe database name: $target_db"
+      ;;
+  esac
+  if [ -n "$legacy_staging_db" ] && [ "$legacy_staging_db" != "$target_db" ]; then
+    case "$legacy_staging_db" in
       ''|*[!A-Za-z0-9_-]*|admin|local|config)
-        fail "unsafe database name: $db"
+        fail "unsafe legacy staging database name: $legacy_staging_db"
         ;;
     esac
-  done
+  elif [ "$legacy_staging_db" = "$target_db" ]; then
+    legacy_staging_db=""
+  fi
   if [ -n "$media_dir" ]; then
     case "$media_dir" in
       /?*) ;;
@@ -198,7 +225,7 @@ for name in "${TARGET_NAMES[@]}"; do
   ACTIVE_NAMES+=("$name")
   ACTIVE_URIS+=("$uri")
   ACTIVE_DBS+=("$target_db")
-  ACTIVE_STAGINGS+=("$staging_db")
+  ACTIVE_LEGACY_STAGINGS+=("$legacy_staging_db")
   ACTIVE_MEDIA_DIRS+=("$media_dir")
   ACTIVE_CMS_URLS+=("$cms_url")
   CURRENT_TARGET=""
@@ -206,7 +233,7 @@ done
 
 [ "${#ACTIVE_NAMES[@]}" -gt 0 ] || fail "no sync targets configured"
 
-for cmd in curl tar gzip jq flock mountpoint mongosh mongoimport openssl od stat find sort mktemp head; do
+for cmd in curl tar gzip jq flock mountpoint mongosh mongoimport openssl od stat find sort mktemp head timeout; do
   command -v "$cmd" >/dev/null 2>&1 || fail "missing command: $cmd"
 done
 
@@ -222,6 +249,15 @@ mongo_import() {
   local coll=$3
   local file=$4
   mongoimport --uri "$uri" --db "$db" --collection "$coll" --file "$file" --jsonArray --quiet
+}
+
+# WORK_DIR is a named volume in the stack, so it is a mount point; clear its
+# contents instead of removing the directory.
+clear_work_dir() {
+  [ -d "$WORK_DIR" ] || return 0
+  while IFS= read -r -d '' entry; do
+    rm -rf "$entry" || fail "cannot remove $entry from $WORK_DIR"
+  done < <(find "$WORK_DIR" -mindepth 1 -maxdepth 1 -print0)
 }
 
 # Keep the secret out of curl's argv. A config on stdin carries the user:pass.
@@ -261,9 +297,10 @@ ARCHIVE_KEY=$(printf '%s\n' "$LIST_XML" \
 [ -n "$ARCHIVE_KEY" ] || fail "no ${ARCHIVE_PREFIX}*.tar.gz archive in s3://$S3_BUCKET"
 
 # 2. Download and extract it once for every target.
-rm -rf "$WORK_DIR"
-mkdir -p "$WORK_DIR/dump"
+mkdir -p "$WORK_DIR" || fail "cannot create $WORK_DIR"
 chmod 700 "$WORK_DIR"
+clear_work_dir
+mkdir -p "$WORK_DIR/dump"
 ARCHIVE="$WORK_DIR/$ARCHIVE_KEY"
 DL_CODE=$(s3_curl --max-time 300 -o "$ARCHIVE" -w '%{http_code}' \
   "$S3_ENDPOINT/$S3_BUCKET/$ARCHIVE_KEY") || {
@@ -290,6 +327,7 @@ for f in "${FILES[@]}"; do
   [[ $c =~ ^[A-Za-z0-9._-]+$ ]] || fail "unsafe collection name in archive: $c"
   case "$c" in
     system.*) fail "unsafe collection name in archive: $c" ;;
+    __staging_*) fail "reserved collection name in archive: $c" ;;
   esac
   n=$(jq -e 'if type == "array" then length else error("not an array") end' "$WORK_DIR/dump/$f") \
     || fail "invalid EJSON in $f"
@@ -491,52 +529,64 @@ process_target() {
   local name=$1
   local uri=$2
   local target_db=$3
-  local staging_db=$4
+  local legacy_staging_db=$4
   local media_dir=$5
   local cms_url=$6
 
   CURRENT_TARGET=$name
+  CURRENT_URI=$uri
+  CURRENT_TARGET_DB=$target_db
+  CURRENT_LEGACY_STAGING=$legacy_staging_db
 
-  # 3. Restore every collection into the target's staging database, empty
-  #    ones included.
-  mongo_eval "$uri" "db.getSiblingDB('$staging_db').dropDatabase()" >/dev/null \
-    || fail "cannot drop $staging_db"
+  # 3. Clean up leftovers from an earlier failed run, then stage every
+  #    collection inside the target database under __staging_<collection>.
+  if [ -n "$legacy_staging_db" ]; then
+    mongo_eval "$uri" "db.getSiblingDB('$legacy_staging_db').dropDatabase()" >/dev/null \
+      || fail "cannot drop legacy staging database $legacy_staging_db"
+  fi
+  mongo_eval "$uri" "
+const d = db.getSiblingDB('$target_db');
+for (const c of d.getCollectionNames()) {
+  if (c.startsWith('__staging_')) d.getCollection(c).drop();
+}
+" >/dev/null || fail "cannot drop leftover staging collections in $target_db"
+
   for c in "${COLLS[@]}"; do
-    mongo_eval "$uri" "db.getSiblingDB('$staging_db').createCollection('$c')" >/dev/null \
-      || fail "cannot create staging collection $c"
+    mongo_eval "$uri" "db.getSiblingDB('$target_db').createCollection('__staging_$c')" >/dev/null \
+      || fail "cannot create staging collection __staging_$c in $target_db"
   done
 
   for c in "${COLLS[@]}"; do
     if [ "${EXPECTED_COUNT[$c]}" -gt 0 ]; then
-      mongo_import "$uri" "$staging_db" "$c" "$WORK_DIR/dump/$c.json" \
-        || fail "import failed for $c"
+      mongo_import "$uri" "$target_db" "__staging_$c" "$WORK_DIR/dump/$c.json" \
+        || fail "staging import into $target_db failed for $c"
     fi
   done
 
   STATS=$(mongo_eval "$uri" "
-const s = db.getSiblingDB('$staging_db');
-const names = s.getCollectionNames();
+const d = db.getSiblingDB('$target_db');
+const names = d.getCollectionNames().filter(c => c.startsWith('__staging_'));
 const counts = {};
 let total = 0;
 for (const c of names) {
-  counts[c] = s.getCollection(c).countDocuments({});
+  counts[c] = d.getCollection(c).countDocuments({});
   total += counts[c];
 }
 print(JSON.stringify({ collections: names.length, documents: total, counts: counts }));
-") || fail "cannot verify $staging_db"
+") || fail "cannot verify staging collections in $target_db"
   STAGE_COLLECTIONS=$(printf '%s' "$STATS" | jq -er '.collections') \
-    || fail "unexpected staging stats: $STATS"
+    || fail "unexpected staging stats in $target_db: $STATS"
   STAGE_DOCS=$(printf '%s' "$STATS" | jq -er '.documents') \
-    || fail "unexpected staging stats: $STATS"
+    || fail "unexpected staging stats in $target_db: $STATS"
   [ "$STAGE_COLLECTIONS" -eq "${#COLLS[@]}" ] \
-    || fail "staging has $STAGE_COLLECTIONS collections, expected ${#COLLS[@]}"
+    || fail "staging in $target_db has $STAGE_COLLECTIONS collections, expected ${#COLLS[@]}"
   [ "$STAGE_DOCS" -eq "$EXPECTED_DOCS" ] \
-    || fail "staging has $STAGE_DOCS documents, expected $EXPECTED_DOCS"
+    || fail "staging in $target_db has $STAGE_DOCS documents, expected $EXPECTED_DOCS"
   for c in "${COLLS[@]}"; do
-    STAGE_COUNT=$(printf '%s' "$STATS" | jq -er --arg c "$c" '.counts[$c]') \
-      || fail "staging is missing collection $c"
+    STAGE_COUNT=$(printf '%s' "$STATS" | jq -er --arg c "__staging_$c" '.counts[$c]') \
+      || fail "staging collection __staging_$c is missing from $target_db"
     [ "$STAGE_COUNT" -eq "${EXPECTED_COUNT[$c]}" ] \
-      || fail "staging collection $c has $STAGE_COUNT documents, expected ${EXPECTED_COUNT[$c]}"
+      || fail "staging collection __staging_$c in $target_db has $STAGE_COUNT documents, expected ${EXPECTED_COUNT[$c]}"
   done
 
   # 4. Swap in per collection; users and payload-preferences stay as they are.
@@ -550,8 +600,8 @@ print(JSON.stringify({ collections: names.length, documents: total, counts: coun
     if [ "$skip" -eq 1 ]; then
       continue
     fi
-    mongo_eval "$uri" "db.adminCommand({ renameCollection: '$staging_db.$c', to: '$target_db.$c', dropTarget: true })" >/dev/null \
-      || fail "swap failed for $c"
+    mongo_eval "$uri" "db.adminCommand({ renameCollection: '$target_db.__staging_$c', to: '$target_db.$c', dropTarget: true })" >/dev/null \
+      || fail "renameCollection within $target_db failed for $c"
   done
 
   # 5. The dev admin is the known dev account. Only this one user is written;
@@ -589,9 +639,13 @@ print(JSON.stringify({
     mirror_media "$uri" "$target_db" "$media_dir" "$name"
   fi
 
-  # 8. Clean up this target's staging database.
-  mongo_eval "$uri" "db.getSiblingDB('$staging_db').dropDatabase()" >/dev/null \
-    || fail "cannot drop $staging_db"
+  # 8. Drop the staging collections, including the keep-list copies.
+  mongo_eval "$uri" "
+const d = db.getSiblingDB('$target_db');
+for (const c of d.getCollectionNames()) {
+  if (c.startsWith('__staging_')) d.getCollection(c).drop();
+}
+" >/dev/null || fail "cannot drop staging collections in $target_db"
 
   local segment="$name collections=${#COLLS[@]} documents=$EXPECTED_DOCS"
   if [ -n "$media_dir" ]; then
@@ -599,15 +653,18 @@ print(JSON.stringify({
   fi
   TARGET_SEGMENTS+=("$segment")
   CURRENT_TARGET=""
+  CURRENT_URI=""
+  CURRENT_TARGET_DB=""
+  CURRENT_LEGACY_STAGING=""
 }
 
 for i in "${!ACTIVE_NAMES[@]}"; do
   process_target "${ACTIVE_NAMES[$i]}" "${ACTIVE_URIS[$i]}" "${ACTIVE_DBS[$i]}" \
-    "${ACTIVE_STAGINGS[$i]}" "${ACTIVE_MEDIA_DIRS[$i]}" "${ACTIVE_CMS_URLS[$i]}"
+    "${ACTIVE_LEGACY_STAGINGS[$i]}" "${ACTIVE_MEDIA_DIRS[$i]}" "${ACTIVE_CMS_URLS[$i]}"
 done
 
-# 9. Remove the shared work directory and report one line naming every target.
-rm -rf "$WORK_DIR" || fail "cannot remove $WORK_DIR"
+# 9. Clear the shared work volume and report one line naming every target.
+clear_work_dir
 
 LINE="OK"
 for segment in "${TARGET_SEGMENTS[@]}"; do

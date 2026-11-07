@@ -18,10 +18,18 @@ container. The reference behaviour is kept in
 | `local` | `rossmoney_dev`, the screenshot service's database | yes, into `/media` | only when `LOCAL_CMS_URL` is set |
 | `atlas` | `rossmoney_me_dev`, the Atlas dev site's database | no | only when `ATLAS_CMS_URL` is set |
 
-Each target reads `<NAME>_MONGODB_URI`, `<NAME>_TARGET_DB`,
-`<NAME>_STAGING_DB`, optionally `<NAME>_MEDIA_DIR`, and optionally
-`<NAME>_CMS_URL`, where `<NAME>` is the uppercased target name. For example,
-`local` uses `LOCAL_MONGODB_URI` and `atlas` uses `ATLAS_MONGODB_URI`.
+Each target reads `<NAME>_MONGODB_URI`, `<NAME>_TARGET_DB`, optionally
+`<NAME>_STAGING_DB` (legacy cleanup only), optionally `<NAME>_MEDIA_DIR`, and
+optionally `<NAME>_CMS_URL`, where `<NAME>` is the uppercased target name. For
+example, `local` uses `LOCAL_MONGODB_URI` and `atlas` uses
+`ATLAS_MONGODB_URI`.
+
+Staging happens inside the target database: each collection is imported as
+`__staging_<collection>` and renamed into place within that same database.
+Atlas rejects `renameCollection` across databases, so the two targets use the
+same mechanism. `<NAME>_STAGING_DB` is legacy: if set, the old separate staging
+database is dropped at target start if it exists, but it is not used for the
+swap.
 
 With no `ATLAS_*` variables set, the default run refreshes only `local` and
 still succeeds. A target named explicitly in `SYNC_TARGETS` is required, so
@@ -34,18 +42,22 @@ still succeeds. A target named explicitly in `SYNC_TARGETS` is required, so
 2. Downloads and extracts it once, rejecting unsafe collection names and
    non-array EJSON files.
 3. For each target, in `SYNC_TARGETS` order:
-   - restores every collection into that target's staging database, including
-     empty ones;
-   - verifies every collection's document count against the dump;
-   - swaps the staged collections into the target database one at a time;
+   - drops any leftover `__staging_*` collections in the target database and
+     the old separate staging database if `<NAME>_STAGING_DB` names one;
+   - restores every collection into that target database as
+     `__staging_<collection>`, including empty ones;
+   - verifies every staging collection's document count against the dump;
+   - renames each `__staging_<collection>` into place within the same target
+     database, one at a time;
    - ensures the dev admin `$DEV_ADMIN_EMAIL` exists and has the password in
      `$DEV_ADMIN_PASSWORD`;
    - if the target names a CMS URL, logs in as the dev admin and calls
      `POST /api/media/backfill` so the site can materialise the imported media
      rows as blob objects;
    - mirrors media only if the target names a media directory;
-   - drops the staging database.
-4. Removes the shared work directory and prints one line naming every target:
+   - drops the remaining `__staging_*` collections.
+4. Removes the shared work directory contents and prints one line naming every
+   target:
 
    ```text
    OK local collections=23 documents=16127 media=7 | atlas collections=23 documents=16127 elapsed=12s archive=adb-rossmoney_20260101_034000.tar.gz
@@ -76,10 +88,11 @@ If the login or the route fails, including a 404 when the route is not deployed
 yet, the script logs one `WARNING: media-backfill ...` line and carries on. The
 database refresh is still reported as a success.
 
-A failure exits non-zero and prints one line naming the target and step:
+A failure exits non-zero and prints one line naming the target, database, and
+mechanism:
 
 ```text
-FAILED: atlas: import failed for posts
+FAILED: atlas: renameCollection within rossmoney_me_dev failed for _pages_versions
 ```
 
 If the S3 listing fails, the line also carries the HTTP status and the first
@@ -113,8 +126,8 @@ in this repository or in the image.
 | `MEDIA_SOURCE` | `https://www.rossmoney.me/media` | `https://media.example.com/media` | Base URL media files are fetched from |
 | `DEV_ADMIN_EMAIL` | required | `dev@example.com` | Dev admin account created or updated in every target |
 | `DEV_ADMIN_PASSWORD` | required | `example-dev-password` | Password for the dev admin |
-| `WORK_DIR` | `/var/lib/rosso-dev-sync/work` | `/var/lib/rosso-dev-sync/work` | Download and staging area; the archive is kept there on failure |
-| `LOG` | `/var/log/rosso-dev-sync/sync.log` | `/var/log/rosso-dev-sync/sync.log` | Bounded job log; use `/dev/stdout` for a direct run |
+| `WORK_DIR` | `/var/lib/rosso-dev-sync/work` | `/var/lib/rosso-dev-sync/work` | Download and staging area; the archive is kept there on failure. The stack mounts a named volume here. |
+| `LOG` | `/var/log/rosso-dev-sync/sync.log` | `/var/log/rosso-dev-sync/sync.log` | Bounded job log; use `/dev/stdout` for a direct run. The stack mounts a named volume at the log directory. |
 | `LOCK` | `/run/rosso-dev-sync.lock` | `/run/rosso-dev-sync.lock` | Prevents overlapping runs |
 | `RUN_ONCE` | `0` | `1` | Run the job immediately instead of starting cron |
 | `TZ` | `UTC` | `UTC` | Container timezone; the crontab also pins UTC |
@@ -125,7 +138,7 @@ in this repository or in the image.
 | --- | --- | --- | --- |
 | `LOCAL_MONGODB_URI` | required | `mongodb://devsync:example-password@mongo.example.com:27017/?authSource=admin` | MongoDB connection URI |
 | `LOCAL_TARGET_DB` | `rossmoney_dev` | `rossmoney_dev` | Dev database refreshed for the screenshot service |
-| `LOCAL_STAGING_DB` | `rossmoney_dev_staging` | `rossmoney_dev_staging` | Temporary restore database |
+| `LOCAL_STAGING_DB` | `rossmoney_dev_staging` | `rossmoney_dev_staging` | Legacy cleanup only: old separate staging DB dropped at target start if present; not used for the swap |
 | `LOCAL_MEDIA_DIR` | `/media` | `/media` | Media directory; set empty to skip the mirror |
 | `LOCAL_CMS_URL` | unset | `https://cms.example.com` | Optional base URL for the media backfill; unset skips it |
 
@@ -135,7 +148,7 @@ in this repository or in the image.
 | --- | --- | --- | --- |
 | `ATLAS_MONGODB_URI` | required when `atlas` is active | `mongodb+srv://devsync:example-password@cluster0.example.com/?retryWrites=true&w=majority` | Atlas SRV connection URI |
 | `ATLAS_TARGET_DB` | required when `atlas` is active | `rossmoney_me_dev` | Atlas dev database |
-| `ATLAS_STAGING_DB` | required when `atlas` is active | `rossmoney_me_dev_staging` | Temporary restore database |
+| `ATLAS_STAGING_DB` | unset | `rossmoney_me_dev_staging` | Legacy cleanup only: old separate staging DB dropped at target start if present; not used for the swap |
 | `ATLAS_MEDIA_DIR` | unset | unset | Optional; Atlas has no media mirror |
 | `ATLAS_CMS_URL` | unset | `https://dev.example.com` | Optional base URL for the media backfill; unset skips it |
 
@@ -183,6 +196,8 @@ Start a one-off container without cron:
 docker run --rm \
   --env-file .env \
   -v rossmoney_media:/media \
+  -v rossmoney_work:/var/lib/rosso-dev-sync/work \
+  -v rossmoney_logs:/var/log/rosso-dev-sync \
   rossmoney-live-to-dev-sync:local run-once
 ```
 
@@ -190,21 +205,27 @@ docker run --rm \
 
 ```console
 docker run --rm -e RUN_ONCE=1 --env-file .env \
-  -v rossmoney_media:/media rossmoney-live-to-dev-sync:local
+  -v rossmoney_media:/media \
+  -v rossmoney_work:/var/lib/rosso-dev-sync/work \
+  -v rossmoney_logs:/var/log/rosso-dev-sync \
+  rossmoney-live-to-dev-sync:local
 ```
 
 To run only one target, pass `SYNC_TARGETS` in the same environment:
 
 ```console
 docker run --rm --env-file .env -e SYNC_TARGETS=local \
-  -v rossmoney_media:/media rossmoney-live-to-dev-sync:local run-once
+  -v rossmoney_media:/media \
+  -v rossmoney_work:/var/lib/rosso-dev-sync/work \
+  -v rossmoney_logs:/var/log/rosso-dev-sync \
+  rossmoney-live-to-dev-sync:local run-once
 ```
 
 Against a container that is already running, execute the job in that container
 so it shares the lock and media directory:
 
 ```console
-docker exec -e LOG=/dev/stdout rossmoney-live-to-dev-sync /usr/local/bin/sync.sh
+docker exec -e LOG=/dev/stdout rosso-dev-sync /usr/local/bin/sync.sh
 ```
 
 ## Deploy as a stack
@@ -225,11 +246,11 @@ the stack environment to provide these placeholders:
 | `${SYNC_TARGETS}` | Space-separated targets; empty uses the container default |
 | `${LOCAL_MONGODB_URI}` | Local MongoDB URI |
 | `${LOCAL_TARGET_DB}` | Local target database; empty uses `rossmoney_dev` |
-| `${LOCAL_STAGING_DB}` | Local staging database; empty uses `rossmoney_dev_staging` |
+| `${LOCAL_STAGING_DB}` | Legacy cleanup only; empty uses `rossmoney_dev_staging` |
 | `${LOCAL_CMS_URL}` | Optional local CMS base URL |
 | `${ATLAS_MONGODB_URI}` | Atlas SRV URI |
 | `${ATLAS_TARGET_DB}` | Atlas target database |
-| `${ATLAS_STAGING_DB}` | Atlas staging database |
+| `${ATLAS_STAGING_DB}` | Legacy cleanup only; empty skips the old Atlas staging DB |
 | `${ATLAS_CMS_URL}` | Optional Atlas CMS base URL |
 | `${S3_ENDPOINT}` | S3-compatible endpoint |
 | `${S3_BUCKET}` | Dump bucket |
@@ -250,6 +271,15 @@ none of them are in this repository.
 files and must be the same directory the screenshot service reads. The Atlas
 target has no media directory.
 
+The stack keeps three host-side pieces of data: the media bind mount from
+`${MEDIA_HOST_PATH}` at `/media`, the `work` named volume at
+`/var/lib/rosso-dev-sync/work`, and the `logs` named volume at
+`/var/log/rosso-dev-sync`. Portainer creates the named volumes. Removing the
+stack's volumes discards the kept archive and the log. The named volumes are
+declared and mounted regardless of the environment; if `WORK_DIR` or `LOG` are
+overridden, the job writes to the overridden path and the named volumes remain
+mounted at the defaults, so keep the defaults to retain that data.
+
 The GHCR package is private, so the Portainer registry configuration needs
 credentials that can pull it.
 
@@ -259,7 +289,7 @@ credentials that can pull it.
 path. The entrypoint follows the log file into the container's stdout, so:
 
 ```console
-docker logs -f rossmoney-live-to-dev-sync
+docker logs -f rosso-dev-sync
 ```
 
 shows every run. The log is rotated to `<log>.1` when it exceeds 2 MB.
