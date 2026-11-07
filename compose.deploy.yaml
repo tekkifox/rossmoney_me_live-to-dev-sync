@@ -26,12 +26,8 @@ services:
       TZ: UTC
     volumes:
       - ${MEDIA_HOST_PATH:-}:/media
-      - work:/var/lib/rosso-dev-sync/work
-      - logs:/var/log/rosso-dev-sync
-
-volumes:
-  work:
-  logs:
+      - ${WORK_HOST_PATH:-}:/var/lib/rosso-dev-sync/work
+      - ${LOG_HOST_PATH:-}:/var/log/rosso-dev-sync
 
 networks:
   default:

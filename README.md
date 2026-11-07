@@ -70,8 +70,8 @@ service signs in with, is untouched.
 
 The media mirror downloads into a temporary directory first. The live
 `/media` directory is replaced only after every file has arrived, so a failed
-download leaves the previous media in place. When `/media` is a volume mount
-point, its contents are replaced in place after the downloads have succeeded.
+download leaves the previous media in place. When `/media` is a mount point,
+its contents are replaced in place after the downloads have succeeded.
 A manifest is written next to the media directory
 (`<media dir>.manifest.json`).
 
@@ -126,8 +126,8 @@ in this repository or in the image.
 | `MEDIA_SOURCE` | `https://www.rossmoney.me/media` | `https://media.example.com/media` | Base URL media files are fetched from |
 | `DEV_ADMIN_EMAIL` | required | `dev@example.com` | Dev admin account created or updated in every target |
 | `DEV_ADMIN_PASSWORD` | required | `example-dev-password` | Password for the dev admin |
-| `WORK_DIR` | `/var/lib/rosso-dev-sync/work` | `/var/lib/rosso-dev-sync/work` | Download and staging area; the archive is kept there on failure. The stack mounts a named volume here. |
-| `LOG` | `/var/log/rosso-dev-sync/sync.log` | `/var/log/rosso-dev-sync/sync.log` | Bounded job log; use `/dev/stdout` for a direct run. The stack mounts a named volume at the log directory. |
+| `WORK_DIR` | `/var/lib/rosso-dev-sync/work` | `/var/lib/rosso-dev-sync/work` | Download and staging area; the archive is kept there on failure. The stack bind-mounts `${WORK_HOST_PATH}` here. |
+| `LOG` | `/var/log/rosso-dev-sync/sync.log` | `/var/log/rosso-dev-sync/sync.log` | Bounded job log; use `/dev/stdout` for a direct run. The stack bind-mounts `${LOG_HOST_PATH}` at the log directory. |
 | `LOCK` | `/run/rosso-dev-sync.lock` | `/run/rosso-dev-sync.lock` | Prevents overlapping runs |
 | `RUN_ONCE` | `0` | `1` | Run the job immediately instead of starting cron |
 | `TZ` | `UTC` | `UTC` | Container timezone; the crontab also pins UTC |
@@ -195,9 +195,9 @@ Start a one-off container without cron:
 ```console
 docker run --rm \
   --env-file .env \
-  -v rossmoney_media:/media \
-  -v rossmoney_work:/var/lib/rosso-dev-sync/work \
-  -v rossmoney_logs:/var/log/rosso-dev-sync \
+  -v "$MEDIA_HOST_PATH":/media \
+  -v "$WORK_HOST_PATH":/var/lib/rosso-dev-sync/work \
+  -v "$LOG_HOST_PATH":/var/log/rosso-dev-sync \
   rossmoney-live-to-dev-sync:local run-once
 ```
 
@@ -205,9 +205,9 @@ docker run --rm \
 
 ```console
 docker run --rm -e RUN_ONCE=1 --env-file .env \
-  -v rossmoney_media:/media \
-  -v rossmoney_work:/var/lib/rosso-dev-sync/work \
-  -v rossmoney_logs:/var/log/rosso-dev-sync \
+  -v "$MEDIA_HOST_PATH":/media \
+  -v "$WORK_HOST_PATH":/var/lib/rosso-dev-sync/work \
+  -v "$LOG_HOST_PATH":/var/log/rosso-dev-sync \
   rossmoney-live-to-dev-sync:local
 ```
 
@@ -215,9 +215,9 @@ To run only one target, pass `SYNC_TARGETS` in the same environment:
 
 ```console
 docker run --rm --env-file .env -e SYNC_TARGETS=local \
-  -v rossmoney_media:/media \
-  -v rossmoney_work:/var/lib/rosso-dev-sync/work \
-  -v rossmoney_logs:/var/log/rosso-dev-sync \
+  -v "$MEDIA_HOST_PATH":/media \
+  -v "$WORK_HOST_PATH":/var/lib/rosso-dev-sync/work \
+  -v "$LOG_HOST_PATH":/var/log/rosso-dev-sync \
   rossmoney-live-to-dev-sync:local run-once
 ```
 
@@ -260,6 +260,8 @@ the stack environment to provide these placeholders:
 | `${DEV_ADMIN_EMAIL}` | Dev admin email |
 | `${DEV_ADMIN_PASSWORD}` | Dev admin password |
 | `${MEDIA_HOST_PATH}` | Absolute host path bind-mounted at `/media` |
+| `${WORK_HOST_PATH}` | Absolute host path bind-mounted at `/var/lib/rosso-dev-sync/work` |
+| `${LOG_HOST_PATH}` | Absolute host path bind-mounted at `/var/log/rosso-dev-sync` |
 
 `LOCAL_MEDIA_DIR` is fixed to `/media` in the stack file and `TZ` is fixed to
 `UTC`. The stack attaches to the external network `rosso-mongo-dev_default`, so
@@ -271,14 +273,20 @@ none of them are in this repository.
 files and must be the same directory the screenshot service reads. The Atlas
 target has no media directory.
 
+`/var/lib/rosso-dev-sync/work` and `/var/log/rosso-dev-sync` are bind mounts
+from `${WORK_HOST_PATH}` and `${LOG_HOST_PATH}`. Both host directories must
+exist and be writable by the container's root user; on the host they are
+`ross:ross` mode `0755` and empty. The image creates the same directories with
+usable ownership, so an empty host directory (or no mount at all) also works.
+
 The stack keeps three host-side pieces of data: the media bind mount from
-`${MEDIA_HOST_PATH}` at `/media`, the `work` named volume at
-`/var/lib/rosso-dev-sync/work`, and the `logs` named volume at
-`/var/log/rosso-dev-sync`. Portainer creates the named volumes. Removing the
-stack's volumes discards the kept archive and the log. The named volumes are
-declared and mounted regardless of the environment; if `WORK_DIR` or `LOG` are
-overridden, the job writes to the overridden path and the named volumes remain
-mounted at the defaults, so keep the defaults to retain that data.
+`${MEDIA_HOST_PATH}` at `/media`, the work bind mount from `${WORK_HOST_PATH}`
+at `/var/lib/rosso-dev-sync/work`, and the log bind mount from
+`${LOG_HOST_PATH}` at `/var/log/rosso-dev-sync`. The stack does not create the
+host directories. Removing their contents discards the kept archive and the
+log. The bind mounts are declared regardless of the environment; if `WORK_DIR`
+or `LOG` are overridden, the job writes to the overridden path and the bind
+mounts remain at the defaults, so keep the defaults to retain that data.
 
 The GHCR package is private, so the Portainer registry configuration needs
 credentials that can pull it.
