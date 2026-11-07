@@ -194,49 +194,49 @@ docker exec -e LOG=/dev/stdout rossmoney-live-to-dev-sync /usr/local/bin/sync.sh
 
 ## Deploy as a stack
 
-Deploy this as a Portainer stack. Set the environment variables in the stack
-environment (or as Portainer secrets); do not bake them into the compose file.
+The stack is created once by hand in Portainer with the name `rosso-dev-sync`.
+After that, every build redeploys it: `.github/workflows/build.yml` builds and
+pushes the image, joins the tailnet with the `TS_AUTHKEY` repository secret, and
+calls the Portainer API with the `PORTAINER_URL` and `PORTAINER_API_KEY`
+repository secrets. The deploy job discovers the stack by name, reads its
+existing `Env` array, and PUTs [`compose.deploy.yaml`](compose.deploy.yaml) with
+`Env` unchanged and `PullImage: true`. It refuses to send an empty Env.
+
+`compose.deploy.yaml` is the single source of the stack definition. It expects
+the stack environment to provide these placeholders:
+
+| Placeholder | Purpose |
+| --- | --- |
+| `${SYNC_TARGETS}` | Space-separated targets; empty uses the container default |
+| `${LOCAL_MONGODB_URI}` | Local MongoDB URI |
+| `${LOCAL_TARGET_DB}` | Local target database; empty uses `rossmoney_dev` |
+| `${LOCAL_STAGING_DB}` | Local staging database; empty uses `rossmoney_dev_staging` |
+| `${LOCAL_CMS_URL}` | Optional local CMS base URL |
+| `${ATLAS_MONGODB_URI}` | Atlas SRV URI |
+| `${ATLAS_TARGET_DB}` | Atlas target database |
+| `${ATLAS_STAGING_DB}` | Atlas staging database |
+| `${ATLAS_CMS_URL}` | Optional Atlas CMS base URL |
+| `${S3_ENDPOINT}` | S3-compatible endpoint |
+| `${S3_BUCKET}` | Dump bucket |
+| `${AWS_ACCESS_KEY_ID}` | S3 access key |
+| `${AWS_SECRET_ACCESS_KEY}` | S3 secret key |
+| `${MEDIA_SOURCE}` | Media source base URL; empty uses the public default |
+| `${DEV_ADMIN_EMAIL}` | Dev admin email |
+| `${DEV_ADMIN_PASSWORD}` | Dev admin password |
+| `${MEDIA_HOST_PATH}` | Absolute host path bind-mounted at `/media` |
+
+`LOCAL_MEDIA_DIR` is fixed to `/media` in the stack file and `TZ` is fixed to
+`UTC`. The stack attaches to the external network `rosso-mongo-dev_default`, so
+`LOCAL_MONGODB_URI` can use the database service name on that network instead of
+an address. All URIs, credentials, and host paths stay in the stack environment;
+none of them are in this repository.
+
+`/media` is a bind mount from `${MEDIA_HOST_PATH}`. It holds the mirrored media
+files and must be the same directory the screenshot service reads. The Atlas
+target has no media directory.
+
 The GHCR package is private, so the Portainer registry configuration needs
 credentials that can pull it.
-
-```yaml
-services:
-  live-to-dev-sync:
-    image: ghcr.io/tekkifox/rossmoney_me_live-to-dev-sync:latest
-    container_name: rossmoney-live-to-dev-sync
-    restart: unless-stopped
-    environment:
-      LOCAL_MONGODB_URI: ${LOCAL_MONGODB_URI}
-      LOCAL_TARGET_DB: ${LOCAL_TARGET_DB:-rossmoney_dev}
-      LOCAL_STAGING_DB: ${LOCAL_STAGING_DB:-rossmoney_dev_staging}
-      LOCAL_MEDIA_DIR: /media
-      LOCAL_CMS_URL: ${LOCAL_CMS_URL:-}
-      ATLAS_MONGODB_URI: ${ATLAS_MONGODB_URI:-}
-      ATLAS_TARGET_DB: ${ATLAS_TARGET_DB:-}
-      ATLAS_STAGING_DB: ${ATLAS_STAGING_DB:-}
-      ATLAS_CMS_URL: ${ATLAS_CMS_URL:-}
-      S3_ENDPOINT: ${S3_ENDPOINT}
-      S3_BUCKET: ${S3_BUCKET}
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
-      MEDIA_SOURCE: ${MEDIA_SOURCE:-https://www.rossmoney.me/media}
-      DEV_ADMIN_EMAIL: ${DEV_ADMIN_EMAIL}
-      DEV_ADMIN_PASSWORD: ${DEV_ADMIN_PASSWORD}
-      TZ: UTC
-    volumes:
-      - media:/media
-
-volumes:
-  media:
-```
-
-Leave `SYNC_TARGETS` unset to use the default `local atlas`; the `atlas` target
-is skipped automatically when `ATLAS_MONGODB_URI` is empty. To run only one
-target, set `SYNC_TARGETS` in the stack environment.
-
-`/media` is a volume. It holds the mirrored media files and must be the same
-directory the screenshot service reads; keeping it on a named volume means the
-files survive container replacement. The Atlas target has no media directory.
 
 ## Cron and logs
 

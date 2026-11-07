@@ -54,3 +54,108 @@ jobs:
             echo
             echo '`${{ steps.build.outputs.digest }}`'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    needs: build
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Join the tailnet
+        uses: tailscale/github-action@v3
+        with:
+          authkey: ${{ secrets.TS_AUTHKEY }}
+          args: --hostname=gh-dev-sync-${{ github.run_id }}
+
+      - name: Deploy Portainer stack
+        env:
+          PORTAINER_URL: ${{ secrets.PORTAINER_URL }}
+          PORTAINER_API_KEY: ${{ secrets.PORTAINER_API_KEY }}
+        run: |
+          set -euo pipefail
+
+          : "${PORTAINER_URL:?PORTAINER_URL is not set}"
+          : "${PORTAINER_API_KEY:?PORTAINER_API_KEY is not set}"
+          PORTAINER_URL=${PORTAINER_URL%/}
+          STACK_NAME=rosso-dev-sync
+          COMPOSE_FILE=compose.deploy.yaml
+          [ -r "$COMPOSE_FILE" ] || {
+            echo "missing $COMPOSE_FILE" >&2
+            exit 1
+          }
+
+          tmp=$(mktemp -d)
+          trap 'rm -rf "$tmp"' EXIT
+
+          api_get() {
+            local path=$1
+            local out=$2
+            local code
+            code=$(curl -ksS -H "X-API-Key: $PORTAINER_API_KEY" \
+              -o "$out" -w '%{http_code}' "$PORTAINER_URL$path") || {
+              echo "GET $path failed" >&2
+              exit 1
+            }
+            if [ "$code" -lt 200 ] || [ "$code" -ge 300 ]; then
+              echo "GET $path returned HTTP $code" >&2
+              cat "$out" >&2
+              exit 1
+            fi
+          }
+
+          api_get /api/stacks "$tmp/stacks.json"
+          stack_id=$(jq -er --arg name "$STACK_NAME" \
+            '[.[] | select(.Name == $name)][0] | .Id' "$tmp/stacks.json") || {
+            echo "stack $STACK_NAME was not found in Portainer" >&2
+            exit 1
+          }
+          endpoint_id=$(jq -er --arg name "$STACK_NAME" \
+            '[.[] | select(.Name == $name)][0] | .EndpointId' \
+            "$tmp/stacks.json") || {
+            echo "stack $STACK_NAME has no EndpointId" >&2
+            exit 1
+          }
+          for id in "$stack_id" "$endpoint_id"; do
+            case "$id" in
+              ''|*[!0-9]*)
+                echo "invalid Portainer id: $id" >&2
+                exit 1
+                ;;
+            esac
+          done
+
+          api_get "/api/stacks/$stack_id" "$tmp/stack.json"
+          env_len=$(jq -er '.Env | length' "$tmp/stack.json") || {
+            echo "stack $STACK_NAME has no Env array" >&2
+            exit 1
+          }
+          [ "$env_len" -gt 0 ] || {
+            echo "refusing to deploy $STACK_NAME with an empty Env" >&2
+            exit 1
+          }
+
+          jq --rawfile stackfile "$COMPOSE_FILE" \
+            '{StackFileContent: $stackfile, Env: .Env, PullImage: true}' \
+            "$tmp/stack.json" > "$tmp/payload.json"
+
+          code=$(curl -ksS -X PUT \
+            -H "X-API-Key: $PORTAINER_API_KEY" \
+            -H 'Content-Type: application/json' \
+            --data-binary @"$tmp/payload.json" \
+            -o "$tmp/deploy.json" -w '%{http_code}' \
+            "$PORTAINER_URL/api/stacks/$stack_id?endpointId=$endpoint_id") || {
+            echo "PUT /api/stacks/$stack_id failed" >&2
+            exit 1
+          }
+          if [ "$code" -lt 200 ] || [ "$code" -ge 300 ]; then
+            echo "PUT /api/stacks/$stack_id returned HTTP $code" >&2
+            cat "$tmp/deploy.json" >&2
+            exit 1
+          fi
+
+          echo "deployed stack $STACK_NAME (id $stack_id)" \
+            "on endpoint $endpoint_id"
