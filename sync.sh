@@ -118,6 +118,7 @@ ACTIVE_URIS=()
 ACTIVE_DBS=()
 ACTIVE_STAGINGS=()
 ACTIVE_MEDIA_DIRS=()
+ACTIVE_CMS_URLS=()
 declare -A SEEN_TARGET=()
 
 for name in "${TARGET_NAMES[@]}"; do
@@ -154,6 +155,15 @@ for name in "${TARGET_NAMES[@]}"; do
   elif [ "$name" = local ]; then
     media_dir=/media
   fi
+  cms_var="${prefix}_CMS_URL"
+  cms_url=""
+  if [ -n "${!cms_var:-}" ]; then
+    cms_url="${!cms_var%/}"
+    case "$cms_url" in
+      http://*|https://*) ;;
+      *) fail "$cms_var must be an http(s) URL" ;;
+    esac
+  fi
 
   if [ "$name" = local ]; then
     target_db=${target_db:-rossmoney_dev}
@@ -184,6 +194,7 @@ for name in "${TARGET_NAMES[@]}"; do
   ACTIVE_DBS+=("$target_db")
   ACTIVE_STAGINGS+=("$staging_db")
   ACTIVE_MEDIA_DIRS+=("$media_dir")
+  ACTIVE_CMS_URLS+=("$cms_url")
   CURRENT_TARGET=""
 done
 
@@ -356,12 +367,63 @@ print(JSON.stringify(Array.from(names).sort()));
   MANIFEST_TMP=""
 }
 
+# Cosmetic follow-up for a target that names a site: materialise the media rows
+# that were just imported as Vercel Blob objects. Login and route failures are
+# warnings only; the database swap has already succeeded.
+run_media_backfill() {
+  local name=$1
+  local cms_url=$2
+  [ -n "$cms_url" ] || return 0
+
+  local login_json
+  local login_code
+  local token
+  local code
+  local uploaded
+  local skipped
+  local failed
+  local login_file="$WORK_DIR/media-backfill-$name-login.json"
+  local response_file="$WORK_DIR/media-backfill-$name-response.json"
+
+  login_json=$(jq -nc --arg email "$DEV_ADMIN_EMAIL" --arg password "$DEV_ADMIN_PASSWORD" \
+    '{email: $email, password: $password}') \
+    || { echo "WARNING: media-backfill $name: cannot encode credentials" >&2; return 0; }
+
+  login_code=$(printf '%s' "$login_json" | \
+    curl -sS --max-time 30 -o "$login_file" -w '%{http_code}' \
+      -X POST -H 'Content-Type: application/json' --data @- \
+      "$cms_url/api/users/login" 2>/dev/null) \
+    || { echo "WARNING: media-backfill $name: login request failed" >&2; return 0; }
+  if [ "$login_code" != 200 ]; then
+    echo "WARNING: media-backfill $name: login returned HTTP $login_code" >&2
+    return 0
+  fi
+  token=$(jq -er '.token' "$login_file" 2>/dev/null) \
+    || { echo "WARNING: media-backfill $name: login returned no token" >&2; return 0; }
+
+  code=$(curl -sS --max-time 120 -o "$response_file" -w '%{http_code}' \
+    -X POST -H "Authorization: JWT $token" "$cms_url/api/media/backfill" 2>/dev/null) \
+    || { echo "WARNING: media-backfill $name: backfill request failed" >&2; return 0; }
+  if [ "$code" != 200 ]; then
+    echo "WARNING: media-backfill $name: backfill returned HTTP $code" >&2
+    return 0
+  fi
+  uploaded=$(jq -er '.uploaded' "$response_file" 2>/dev/null) \
+    || { echo "WARNING: media-backfill $name: unexpected response" >&2; return 0; }
+  skipped=$(jq -er '.skipped' "$response_file" 2>/dev/null) \
+    || { echo "WARNING: media-backfill $name: unexpected response" >&2; return 0; }
+  failed=$(jq -er '.failed' "$response_file" 2>/dev/null) \
+    || { echo "WARNING: media-backfill $name: unexpected response" >&2; return 0; }
+  echo "media-backfill uploaded=$uploaded skipped=$skipped failed=$failed target=$name"
+}
+
 process_target() {
   local name=$1
   local uri=$2
   local target_db=$3
   local staging_db=$4
   local media_dir=$5
+  local cms_url=$6
 
   CURRENT_TARGET=$name
 
@@ -447,13 +509,17 @@ print(JSON.stringify({
     || fail "unexpected dev admin stats: $ADMIN_RESULT"
   [ "$ADMINS" -eq 1 ] || fail "dev admin $DEV_ADMIN_EMAIL is missing after the swap"
 
-  # 6. Mirror media only for a target that names a media directory.
+  # 6. Cosmetic: ask the site to materialise the imported media rows as blob
+  #    objects. A warning here does not fail the refresh.
+  run_media_backfill "$name" "$cms_url"
+
+  # 7. Mirror media only for a target that names a media directory.
   MEDIA_COUNT=""
   if [ -n "$media_dir" ]; then
     mirror_media "$uri" "$target_db" "$media_dir" "$name"
   fi
 
-  # 7. Clean up this target's staging database.
+  # 8. Clean up this target's staging database.
   mongo_eval "$uri" "db.getSiblingDB('$staging_db').dropDatabase()" >/dev/null \
     || fail "cannot drop $staging_db"
 
@@ -467,10 +533,10 @@ print(JSON.stringify({
 
 for i in "${!ACTIVE_NAMES[@]}"; do
   process_target "${ACTIVE_NAMES[$i]}" "${ACTIVE_URIS[$i]}" "${ACTIVE_DBS[$i]}" \
-    "${ACTIVE_STAGINGS[$i]}" "${ACTIVE_MEDIA_DIRS[$i]}"
+    "${ACTIVE_STAGINGS[$i]}" "${ACTIVE_MEDIA_DIRS[$i]}" "${ACTIVE_CMS_URLS[$i]}"
 done
 
-# 8. Remove the shared work directory and report one line naming every target.
+# 9. Remove the shared work directory and report one line naming every target.
 rm -rf "$WORK_DIR" || fail "cannot remove $WORK_DIR"
 
 LINE="OK"

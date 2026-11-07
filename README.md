@@ -13,15 +13,15 @@ container. The reference behaviour is kept in
 `SYNC_TARGETS` is a space-separated list of target names. The default is
 `local atlas`:
 
-| Target | Database | Media mirror |
-| --- | --- | --- |
-| `local` | `rossmoney_dev`, the screenshot service's database | yes, into `/media` |
-| `atlas` | `rossmoney_me_dev`, what `dev.rossmoney.me` reads | no |
+| Target | Database | Media mirror | CMS media backfill |
+| --- | --- | --- | --- |
+| `local` | `rossmoney_dev`, the screenshot service's database | yes, into `/media` | only when `LOCAL_CMS_URL` is set |
+| `atlas` | `rossmoney_me_dev`, what `dev.rossmoney.me` reads | no | only when `ATLAS_CMS_URL` is set |
 
 Each target reads `<NAME>_MONGODB_URI`, `<NAME>_TARGET_DB`,
-`<NAME>_STAGING_DB`, and optionally `<NAME>_MEDIA_DIR`, where `<NAME>` is the
-uppercased target name. For example, `local` uses `LOCAL_MONGODB_URI` and
-`atlas` uses `ATLAS_MONGODB_URI`.
+`<NAME>_STAGING_DB`, optionally `<NAME>_MEDIA_DIR`, and optionally
+`<NAME>_CMS_URL`, where `<NAME>` is the uppercased target name. For example,
+`local` uses `LOCAL_MONGODB_URI` and `atlas` uses `ATLAS_MONGODB_URI`.
 
 With no `ATLAS_*` variables set, the default run refreshes only `local` and
 still succeeds. A target named explicitly in `SYNC_TARGETS` is required, so
@@ -40,6 +40,9 @@ still succeeds. A target named explicitly in `SYNC_TARGETS` is required, so
    - swaps the staged collections into the target database one at a time;
    - ensures the dev admin `$DEV_ADMIN_EMAIL` exists and has the password in
      `$DEV_ADMIN_PASSWORD`;
+   - if the target names a CMS URL, logs in as the dev admin and calls
+     `POST /api/media/backfill` so the site can materialise the imported media
+     rows as blob objects;
    - mirrors media only if the target names a media directory;
    - drops the staging database.
 4. Removes the shared work directory and prints one line naming every target:
@@ -57,6 +60,19 @@ The media mirror downloads into a temporary directory first. The live
 `/media` directory is replaced only after every file has arrived, so a failed
 download leaves the previous media in place. A manifest is written next to the
 media directory (`<media dir>.manifest.json`).
+
+The CMS media backfill is cosmetic. When a target has `<NAME>_CMS_URL`, the
+script logs in with `POST $CMS_URL/api/users/login` using the dev admin
+credentials, then calls `POST $CMS_URL/api/media/backfill` with
+`Authorization: JWT <token>` and no body. It prints one line per target:
+
+```text
+media-backfill uploaded=2 skipped=5 failed=0 target=atlas
+```
+
+If the login or the route fails, including a 404 when the route is not deployed
+yet, the script logs one `WARNING: media-backfill ...` line and carries on. The
+database refresh is still reported as a success.
 
 A failure exits non-zero and prints one line naming the target and step:
 
@@ -102,6 +118,7 @@ in this repository or in the image.
 | `LOCAL_TARGET_DB` | `rossmoney_dev` | `rossmoney_dev` | Dev database refreshed for the screenshot service |
 | `LOCAL_STAGING_DB` | `rossmoney_dev_staging` | `rossmoney_dev_staging` | Temporary restore database |
 | `LOCAL_MEDIA_DIR` | `/media` | `/media` | Media directory; set empty to skip the mirror |
+| `LOCAL_CMS_URL` | unset | `https://cms.example.com` | Optional base URL for the media backfill; unset skips it |
 
 ### Atlas target
 
@@ -111,6 +128,7 @@ in this repository or in the image.
 | `ATLAS_TARGET_DB` | required when `atlas` is active | `rossmoney_me_dev` | Atlas dev database |
 | `ATLAS_STAGING_DB` | required when `atlas` is active | `rossmoney_me_dev_staging` | Temporary restore database |
 | `ATLAS_MEDIA_DIR` | unset | unset | Optional; Atlas has no media mirror |
+| `ATLAS_CMS_URL` | unset | `https://dev.example.com` | Optional base URL for the media backfill; unset skips it |
 
 The Atlas URI must use the `mongodb+srv` shape. `mongodb+srv` resolves the
 cluster through DNS and uses TLS by default, so the image includes
@@ -122,16 +140,15 @@ cluster through DNS and uses TLS by default, so the image includes
 
 ## Build
 
-The image is built and published by `.github/workflows/build.yml` on the
-self-hosted paseo runner. A push to `main` or a manual `workflow_dispatch`
-publishes:
+The image is built and published by `.github/workflows/build.yml` on a
+GitHub-hosted `ubuntu-latest` runner. A push to `main` or a manual
+`workflow_dispatch` publishes:
 
 - `ghcr.io/tekkifox/rossmoney_me_live-to-dev-sync:latest`
 - `ghcr.io/tekkifox/rossmoney_me_live-to-dev-sync:sha-<short sha>`
 
-Pull requests also build the image as a check. A same-repository pull request
-pushes only its short-SHA tag; `latest` is enabled only on the default branch.
-Fork pull requests build without pushing.
+The build uses the `gha` cache (`cache-from`/`cache-to`), so rebuilds do not
+depend on a warm host.
 
 To build locally where a Docker daemon is available:
 
@@ -189,9 +206,11 @@ services:
       LOCAL_TARGET_DB: ${LOCAL_TARGET_DB:-rossmoney_dev}
       LOCAL_STAGING_DB: ${LOCAL_STAGING_DB:-rossmoney_dev_staging}
       LOCAL_MEDIA_DIR: /media
+      LOCAL_CMS_URL: ${LOCAL_CMS_URL:-}
       ATLAS_MONGODB_URI: ${ATLAS_MONGODB_URI:-}
       ATLAS_TARGET_DB: ${ATLAS_TARGET_DB:-}
       ATLAS_STAGING_DB: ${ATLAS_STAGING_DB:-}
+      ATLAS_CMS_URL: ${ATLAS_CMS_URL:-}
       S3_ENDPOINT: ${S3_ENDPOINT}
       S3_BUCKET: ${S3_BUCKET}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
