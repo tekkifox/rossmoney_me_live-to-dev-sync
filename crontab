@@ -1,0 +1,9 @@
+# Daily refresh of the dev databases from the newest production dump.
+# Times are UTC. The container entrypoint writes the deployment environment to
+# /run/rosso-dev-sync.env for this job.
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+CRON_TZ=UTC
+TZ=UTC
+
+40 3 * * * root set -a; . /run/rosso-dev-sync.env; set +a; exec /usr/local/bin/sync.sh

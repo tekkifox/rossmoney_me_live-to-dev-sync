@@ -1,0 +1,31 @@
+services:
+  live-to-dev-sync:
+    image: ghcr.io/tekkifox/rossmoney_me_live-to-dev-sync:latest
+    container_name: rosso-dev-sync
+    restart: unless-stopped
+    environment:
+      SYNC_TARGETS: ${SYNC_TARGETS:-}
+      LOCAL_MONGODB_URI: ${LOCAL_MONGODB_URI:-}
+      LOCAL_TARGET_DB: ${LOCAL_TARGET_DB:-}
+      LOCAL_STAGING_DB: ${LOCAL_STAGING_DB:-}
+      LOCAL_MEDIA_DIR: /media
+      LOCAL_CMS_URL: ${LOCAL_CMS_URL:-}
+      ATLAS_MONGODB_URI: ${ATLAS_MONGODB_URI:-}
+      ATLAS_TARGET_DB: ${ATLAS_TARGET_DB:-}
+      ATLAS_STAGING_DB: ${ATLAS_STAGING_DB:-}
+      ATLAS_CMS_URL: ${ATLAS_CMS_URL:-}
+      S3_ENDPOINT: ${S3_ENDPOINT:-}
+      S3_BUCKET: ${S3_BUCKET:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      MEDIA_SOURCE: ${MEDIA_SOURCE:-}
+      DEV_ADMIN_EMAIL: ${DEV_ADMIN_EMAIL:-}
+      DEV_ADMIN_PASSWORD: ${DEV_ADMIN_PASSWORD:-}
+      TZ: UTC
+    volumes:
+      - ${MEDIA_HOST_PATH:-}:/media
+
+networks:
+  default:
+    external: true
+    name: rosso-mongo-dev_default
