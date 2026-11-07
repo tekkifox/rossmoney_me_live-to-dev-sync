@@ -91,6 +91,7 @@ case "$WORK_DIR" in
 esac
 case "$WORK_DIR" in
   */) fail "WORK_DIR must not end with a slash" ;;
+  *..*) fail "WORK_DIR must not contain .." ;;
 esac
 S3_ENDPOINT=${S3_ENDPOINT%/}
 case "$S3_ENDPOINT" in
@@ -174,7 +175,7 @@ for name in "${TARGET_NAMES[@]}"; do
   [ "$staging_db" != "$target_db" ] || fail "STAGING_DB and TARGET_DB must differ"
   for db in "$staging_db" "$target_db"; do
     case "$db" in
-      ''|*[!A-Za-z0-9_-]*)
+      ''|*[!A-Za-z0-9_-]*|admin|local|config)
         fail "unsafe database name: $db"
         ;;
     esac
@@ -186,6 +187,7 @@ for name in "${TARGET_NAMES[@]}"; do
     esac
     case "$media_dir" in
       */) fail "MEDIA_DIR must not end with a slash" ;;
+      *..*) fail "MEDIA_DIR must not contain .." ;;
     esac
   fi
 
@@ -258,6 +260,9 @@ EXPECTED_DOCS=0
 for f in "${FILES[@]}"; do
   c=${f%.json}
   [[ $c =~ ^[A-Za-z0-9._-]+$ ]] || fail "unsafe collection name in archive: $c"
+  case "$c" in
+    system.*) fail "unsafe collection name in archive: $c" ;;
+  esac
   n=$(jq -e 'if type == "array" then length else error("not an array") end' "$WORK_DIR/dump/$f") \
     || fail "invalid EJSON in $f"
   COLLS+=("$c")
