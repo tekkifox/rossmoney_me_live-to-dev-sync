@@ -230,16 +230,18 @@ docker exec -e LOG=/dev/stdout rosso-dev-sync /usr/local/bin/sync.sh
 
 ## Deploy as a stack
 
-The stack is created once by hand in Portainer with the name `rosso-dev-sync`.
-After that, every build redeploys it: `.github/workflows/build.yml` builds and
-pushes the image, joins the tailnet with the `TS_AUTHKEY` repository secret, and
-calls the Portainer API with the `PORTAINER_URL` and `PORTAINER_API_KEY`
-repository secrets. The deploy job discovers the stack by name, reads its
-existing `Env` array, and PUTs [`compose.deploy.yaml`](compose.deploy.yaml) with
-`Env` unchanged and `PullImage: true`. It refuses to send an empty Env.
+The stack is Ansible-owned on `paseo` as `paseo-rosso-dev-sync`, running
+`ghcr.io/tekkifox/rossmoney_me_live-to-dev-sync:latest`. This repository
+publishes that image but does not create or edit the stack. After every push to
+`main`, `.github/workflows/build.yml` builds and pushes the image, joins the
+tailnet with the `TS_AUTHKEY` repository secret, then uses the `DEPLOY_SSH_KEY`
+and `DEPLOY_SEAT_HOST` repository secrets to ask the fleet deploy seat to
+deploy `paseo-rosso-dev-sync` on `paseo`. The first push to `main` after this
+change is the proof that the deploy works.
 
-`compose.deploy.yaml` is the single source of the stack definition. It expects
-the stack environment to provide these placeholders:
+[`compose.deploy.yaml`](compose.deploy.yaml) is kept as the reference stack
+definition; CI no longer reads it. The stack's environment is maintained by the
+fleet Ansible configuration, which must provide these placeholders:
 
 | Placeholder | Purpose |
 | --- | --- |
@@ -288,8 +290,8 @@ log. The bind mounts are declared regardless of the environment; if `WORK_DIR`
 or `LOG` are overridden, the job writes to the overridden path and the bind
 mounts remain at the defaults, so keep the defaults to retain that data.
 
-The GHCR package is private, so the Portainer registry configuration needs
-credentials that can pull it.
+The GHCR package is private, so the fleet deployment configuration needs
+registry credentials that can pull it.
 
 ## Cron and logs
 
