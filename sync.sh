@@ -29,6 +29,13 @@ WORK_DIR=${WORK_DIR:-/var/lib/rosso-dev-sync/work}
 LOG=${LOG:-/var/log/rosso-dev-sync/sync.log}
 LOCK=${LOCK:-/run/rosso-dev-sync.lock}
 
+# The CMS backfill posts to a site that may be hosted behind a CDN. A DNS or
+# connection blip used to skip the whole cosmetic step, so retry a transport
+# failure a few times with a short backoff. The worst case stays bounded: the
+# login adds at most 3x30s plus 6s of backoff, the backfill 3x120s plus 6s.
+CMS_ATTEMPTS=3
+CMS_RETRY_DELAY=2
+
 START=$SECONDS
 ARCHIVE_KEY=""
 ARCHIVE=""
@@ -39,6 +46,8 @@ CURRENT_TARGET=""
 CURRENT_URI=""
 CURRENT_TARGET_DB=""
 CURRENT_LEGACY_STAGING=""
+POST_ATTEMPTS=0
+POST_CODE=""
 TARGET_SEGMENTS=()
 
 fail() {
@@ -233,7 +242,7 @@ done
 
 [ "${#ACTIVE_NAMES[@]}" -gt 0 ] || fail "no sync targets configured"
 
-for cmd in curl tar gzip jq flock mountpoint mongosh mongoimport openssl od stat find sort mktemp head timeout; do
+for cmd in curl tar gzip jq flock mountpoint mongosh mongoimport openssl od stat find sort mktemp head timeout sleep; do
   command -v "$cmd" >/dev/null 2>&1 || fail "missing command: $cmd"
 done
 
@@ -478,6 +487,45 @@ print(JSON.stringify(Array.from(names).sort()));
   MANIFEST_TMP=""
 }
 
+# Post over HTTP with a small bounded retry around a transport failure (DNS,
+# connection reset, timeout). An HTTP answer, even an error, is not retried:
+# the server replied, so the failure is real and the caller reports the code.
+#
+# post_with_retry <attempts> <delay> <body> <output file> <curl args...>
+# A non-empty <body> is piped to curl on every attempt so the credentials never
+# appear in curl's argv. On success POST_CODE holds the HTTP code and
+# POST_ATTEMPTS the number of attempts; on failure POST_ATTEMPTS still reports
+# the attempts made.
+post_with_retry() {
+  local attempts=$1
+  local delay=$2
+  local body=$3
+  local out=$4
+  local attempt=1
+  local code
+  shift 4
+
+  POST_CODE=""
+  POST_ATTEMPTS=0
+  while :; do
+    POST_ATTEMPTS=$attempt
+    if [ -n "$body" ]; then
+      code=$(printf '%s' "$body" | \
+        curl -sS -o "$out" -w '%{http_code}' "$@" 2>/dev/null) || code=""
+    else
+      code=$(curl -sS -o "$out" -w '%{http_code}' "$@" 2>/dev/null) || code=""
+    fi
+    if [ -n "$code" ]; then
+      POST_CODE=$code
+      return 0
+    fi
+    [ "$attempt" -lt "$attempts" ] || return 1
+    sleep "$delay"
+    attempt=$((attempt + 1))
+    delay=$((delay * 2))
+  done
+}
+
 # Cosmetic follow-up for a target that names a site: materialise the media rows
 # that were just imported as Vercel Blob objects. Login and route failures are
 # warnings only; the database swap has already succeeded.
@@ -500,23 +548,36 @@ run_media_backfill() {
     '{email: $email, password: $password}') \
     || { echo "WARNING: media-backfill $name: cannot encode credentials" >&2; return 0; }
 
-  login_code=$(printf '%s' "$login_json" | \
-    curl -sS --max-time 30 -o "$login_file" -w '%{http_code}' \
-      -X POST -H 'Content-Type: application/json' --data @- \
-      "$cms_url/api/users/login" 2>/dev/null) \
-    || { echo "WARNING: media-backfill $name: login request failed" >&2; return 0; }
+  if ! post_with_retry "$CMS_ATTEMPTS" "$CMS_RETRY_DELAY" \
+    "$login_json" "$login_file" --max-time 30 \
+    -X POST -H 'Content-Type: application/json' --data @- \
+    "$cms_url/api/users/login"; then
+    echo "WARNING: media-backfill $name: login request failed after $POST_ATTEMPTS attempt(s)" >&2
+    return 0
+  fi
+  login_code=$POST_CODE
+  if [ "$POST_ATTEMPTS" -gt 1 ]; then
+    echo "media-backfill $name: login succeeded on attempt $POST_ATTEMPTS"
+  fi
   if [ "$login_code" != 200 ]; then
-    echo "WARNING: media-backfill $name: login returned HTTP $login_code" >&2
+    echo "WARNING: media-backfill $name: login returned HTTP $login_code after $POST_ATTEMPTS attempt(s)" >&2
     return 0
   fi
   token=$(jq -er '.token' "$login_file" 2>/dev/null) \
     || { echo "WARNING: media-backfill $name: login returned no token" >&2; return 0; }
 
-  code=$(curl -sS --max-time 120 -o "$response_file" -w '%{http_code}' \
-    -X POST -H "Authorization: JWT $token" "$cms_url/api/media/backfill" 2>/dev/null) \
-    || { echo "WARNING: media-backfill $name: backfill request failed" >&2; return 0; }
+  if ! post_with_retry "$CMS_ATTEMPTS" "$CMS_RETRY_DELAY" "" "$response_file" \
+    --max-time 120 -X POST -H "Authorization: JWT $token" \
+    "$cms_url/api/media/backfill"; then
+    echo "WARNING: media-backfill $name: backfill request failed after $POST_ATTEMPTS attempt(s)" >&2
+    return 0
+  fi
+  code=$POST_CODE
+  if [ "$POST_ATTEMPTS" -gt 1 ]; then
+    echo "media-backfill $name: backfill succeeded on attempt $POST_ATTEMPTS"
+  fi
   if [ "$code" != 200 ]; then
-    echo "WARNING: media-backfill $name: backfill returned HTTP $code" >&2
+    echo "WARNING: media-backfill $name: backfill returned HTTP $code after $POST_ATTEMPTS attempt(s)" >&2
     return 0
   fi
   uploaded=$(jq -er '.uploaded' "$response_file" 2>/dev/null) \
