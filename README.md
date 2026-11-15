@@ -86,7 +86,23 @@ media-backfill uploaded=2 skipped=5 failed=0 target=atlas
 
 If the login or the route fails, including a 404 when the route is not deployed
 yet, the script logs one `WARNING: media-backfill ...` line and carries on. The
-database refresh is still reported as a success.
+database refresh is still reported as a success. A transport failure, where no
+HTTP answer arrived at all, carries curl's exit status and reason so the log
+says why every attempt failed:
+
+```text
+WARNING: media-backfill atlas: login request failed after 3 attempt(s): curl exit 28 (Operation timed out after 120000 milliseconds with 0 bytes received)
+```
+
+An HTTP answer is reported with its code instead, for example
+`login returned HTTP 401`. Curl's error text names the host and the failure
+mode, never the request body or the credentials, and the saved response is not
+printed.
+
+The login allows 120 seconds per attempt because the CMS sits behind a Vercel
+preview deployment: a cold serverless function has been measured at 17.3s
+before the first byte, and a shorter limit loses the whole backfill to a slow
+start.
 
 A failure exits non-zero and prints one line naming the target, database, and
 mechanism:

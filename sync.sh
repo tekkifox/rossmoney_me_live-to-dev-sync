@@ -32,9 +32,19 @@ LOCK=${LOCK:-/run/rosso-dev-sync.lock}
 # The CMS backfill posts to a site that may be hosted behind a CDN. A DNS or
 # connection blip used to skip the whole cosmetic step, so retry a transport
 # failure a few times with a short backoff. The worst case stays bounded: the
-# login adds at most 3x30s plus 6s of backoff, the backfill 3x120s plus 6s.
+# login adds at most 3x120s plus 6s of backoff, the backfill 3x120s plus 6s.
 CMS_ATTEMPTS=3
 CMS_RETRY_DELAY=2
+
+# The login goes through a Vercel preview deployment, so it can land on a cold
+# serverless function. Measured from inside the container: warm requests reach
+# first byte in 0.60s, but one cold start took 17.3s before the response began.
+# The old 30s per-attempt limit sat too close to that, and a longer cold start
+# produced no HTTP answer at all, so the whole backfill was skipped. Give the
+# login the same 120s budget as the backfill POST rather than cut a cold start
+# off mid-wait; this is not a request that a warm server should ever need 120s
+# for.
+CMS_LOGIN_TIMEOUT=120
 
 START=$SECONDS
 ARCHIVE_KEY=""
@@ -48,6 +58,7 @@ CURRENT_TARGET_DB=""
 CURRENT_LEGACY_STAGING=""
 POST_ATTEMPTS=0
 POST_CODE=""
+POST_ERROR=""
 TARGET_SEGMENTS=()
 
 fail() {
@@ -496,6 +507,11 @@ print(JSON.stringify(Array.from(names).sort()));
 # appear in curl's argv. On success POST_CODE holds the HTTP code and
 # POST_ATTEMPTS the number of attempts; on failure POST_ATTEMPTS still reports
 # the attempts made.
+#
+# On a transport failure POST_ERROR carries curl's exit status and the reason
+# from the last attempt, so the caller can log why it gave up. curl's stderr
+# names the host and the failure mode; it never contains the request body or
+# the Authorization header. The response file itself is never printed.
 post_with_retry() {
   local attempts=$1
   local delay=$2
@@ -503,27 +519,54 @@ post_with_retry() {
   local out=$4
   local attempt=1
   local code
+  local rc=0
+  local reason
+  local stderr_file
   shift 4
 
+  stderr_file=$(mktemp "${TMPDIR:-/tmp}/post-with-retry.XXXXXX") || {
+    POST_CODE=""
+    POST_ATTEMPTS=0
+    POST_ERROR="cannot create a temporary file for curl stderr"
+    return 1
+  }
   POST_CODE=""
   POST_ATTEMPTS=0
+  POST_ERROR=""
   while :; do
     POST_ATTEMPTS=$attempt
     if [ -n "$body" ]; then
-      code=$(printf '%s' "$body" | \
-        curl -sS -o "$out" -w '%{http_code}' "$@" 2>/dev/null) || code=""
+      if code=$(printf '%s' "$body" | \
+        curl -sS -o "$out" -w '%{http_code}' "$@" 2>"$stderr_file"); then
+        rc=0
+      else
+        rc=$?
+      fi
     else
-      code=$(curl -sS -o "$out" -w '%{http_code}' "$@" 2>/dev/null) || code=""
+      if code=$(curl -sS -o "$out" -w '%{http_code}' "$@" 2>"$stderr_file"); then
+        rc=0
+      else
+        rc=$?
+      fi
     fi
-    if [ -n "$code" ]; then
+    if [ "$rc" -eq 0 ] && [ -n "$code" ]; then
       POST_CODE=$code
+      POST_ERROR=""
+      rm -f "$stderr_file"
       return 0
     fi
-    [ "$attempt" -lt "$attempts" ] || return 1
+    POST_ERROR="curl exit $rc"
+    reason=$(tr '\n' ' ' <"$stderr_file" | tr -s ' ' | sed -e 's/^ //' -e 's/ $//')
+    if [ -n "$reason" ]; then
+      POST_ERROR="$POST_ERROR ($reason)"
+    fi
+    [ "$attempt" -lt "$attempts" ] || break
     sleep "$delay"
     attempt=$((attempt + 1))
     delay=$((delay * 2))
   done
+  rm -f "$stderr_file"
+  return 1
 }
 
 # Cosmetic follow-up for a target that names a site: materialise the media rows
@@ -549,10 +592,10 @@ run_media_backfill() {
     || { echo "WARNING: media-backfill $name: cannot encode credentials" >&2; return 0; }
 
   if ! post_with_retry "$CMS_ATTEMPTS" "$CMS_RETRY_DELAY" \
-    "$login_json" "$login_file" --max-time 30 \
+    "$login_json" "$login_file" --max-time "$CMS_LOGIN_TIMEOUT" \
     -X POST -H 'Content-Type: application/json' --data @- \
     "$cms_url/api/users/login"; then
-    echo "WARNING: media-backfill $name: login request failed after $POST_ATTEMPTS attempt(s)" >&2
+    echo "WARNING: media-backfill $name: login request failed after $POST_ATTEMPTS attempt(s): $POST_ERROR" >&2
     return 0
   fi
   login_code=$POST_CODE
@@ -569,7 +612,7 @@ run_media_backfill() {
   if ! post_with_retry "$CMS_ATTEMPTS" "$CMS_RETRY_DELAY" "" "$response_file" \
     --max-time 120 -X POST -H "Authorization: JWT $token" \
     "$cms_url/api/media/backfill"; then
-    echo "WARNING: media-backfill $name: backfill request failed after $POST_ATTEMPTS attempt(s)" >&2
+    echo "WARNING: media-backfill $name: backfill request failed after $POST_ATTEMPTS attempt(s): $POST_ERROR" >&2
     return 0
   fi
   code=$POST_CODE
