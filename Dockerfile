@@ -2,8 +2,8 @@ FROM ubuntu:22.04 AS curl-build
 
 # curl 8.10.1 is needed for correct --aws-sigv4 handling of signed S3 listing
 # requests with a query string. Build it from the official source with a static
-# libcurl; the final image is Ubuntu 22.04 (the mongo:7 base), so the binary
-# uses the same OpenSSL and zlib.
+# libcurl; the final image is Ubuntu 26.04 (the mongo:9 base), which provides
+# the OpenSSL 3.x and zlib shared libraries the binary links against.
 ARG CURL_VERSION=8.10.1
 
 RUN apt-get update \
@@ -47,11 +47,11 @@ RUN wget -q "https://curl.se/download/curl-${CURL_VERSION}.tar.gz" -O /tmp/curl.
 
 FROM mongo:9
 
-# mongo:7 already carries mongosh and mongoimport. openssl is used to produce
-# Payload's pbkdf2-sha256-v1 password hash without pulling in a full runtime.
-# ca-certificates covers the Atlas mongodb+srv TLS connections. The curl built
-# above replaces the base image's 7.81, whose --aws-sigv4 handling breaks signed
-# S3 listing requests with a query string.
+# mongo:9 already carries mongosh and mongoimport (mongodb-org-tools). openssl
+# is used to produce Payload's pbkdf2-sha256-v1 password hash without pulling in
+# a full runtime. ca-certificates covers the Atlas mongodb+srv TLS connections.
+# The curl built above replaces the distro curl so the pinned --aws-sigv4
+# behaviour for signed S3 listing requests with a query string stays available.
 USER root
 
 RUN apt-get update \

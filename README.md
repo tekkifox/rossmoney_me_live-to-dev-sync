@@ -179,11 +179,12 @@ how the deployment is wired.
 
 ## Build
 
-The image is based on `mongo:7`, but it carries curl `8.10.1` built from the
-official curl source in a builder stage, ahead of the base image's curl `7.81.0`.
-The older curl mishandles `--aws-sigv4` with a query string, which turns an S3
-listing into `SignatureDoesNotMatch`; the Mongo tooling is unchanged. The build
-asserts `curl --version`, and the image smoke test checks `curl`, `mongosh`,
+The image is based on `mongo:9` (Ubuntu 26.04), but it carries curl `8.10.1`
+built from the official curl source in a builder stage. The distro curl in the
+older `mongo:7` base mishandled `--aws-sigv4` with a query string, which turns
+an S3 listing into `SignatureDoesNotMatch`; the pinned build keeps that fixed.
+The Mongo tooling comes from `mongo:9` and is unchanged. The build asserts
+`curl --version`, and the image smoke test checks `curl`, `mongosh`,
 `mongoimport`, and an anonymous HTTPS request. The signed S3 listing needs the
 stack credentials, so it is not run in CI.
 
