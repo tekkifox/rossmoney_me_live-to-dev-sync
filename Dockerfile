@@ -45,7 +45,7 @@ RUN wget -q "https://curl.se/download/curl-${CURL_VERSION}.tar.gz" -O /tmp/curl.
  && make -j"$(nproc)" \
  && strip src/curl
 
-FROM mongo:7
+FROM mongo:9
 
 # mongo:7 already carries mongosh and mongoimport. openssl is used to produce
 # Payload's pbkdf2-sha256-v1 password hash without pulling in a full runtime.
