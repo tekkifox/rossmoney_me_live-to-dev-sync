@@ -1,4 +1,4 @@
-FROM ubuntu:22.04 AS curl-build
+FROM ubuntu:26.04 AS curl-build
 
 # curl 8.10.1 is needed for correct --aws-sigv4 handling of signed S3 listing
 # requests with a query string. Build it from the official source with a static
