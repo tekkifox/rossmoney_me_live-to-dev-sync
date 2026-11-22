@@ -82,28 +82,32 @@ jobs:
           echo "anonymous HTTPS health check: HTTP $code"
           [ "$code" = 200 ]
 
+  # The fleet's stacks are Ansible-managed files on disk. This job asks the
+  # deploy seat on mgmt to pull and recreate the stack over SSH from the
+  # self-hosted runner; the seat validates the host and stacks, refuses a stack
+  # the host does not declare, and prints the image id afterwards.
+  #
+  # This is deliberately self-contained rather than a call to the fleet's
+  # reusable deploy-stack.yml: that workflow lives in the private
+  # tekkifox/infrastructure-as-code repository, and GitHub does not let a public
+  # repository call a reusable workflow in a private one. The duplicated lines
+  # here are only transport, and the price of this repository being public.
+  # The seat address is a repo secret (DEPLOY_SEAT_HOST) so no real hostname is
+  # published here. The deploy key is preinstalled on the self-hosted runner at
+  # $HOME/.ssh/deploy.
   deploy:
     name: Deploy the dev sync
     needs: build
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
-      - name: Join the tailnet
-        uses: tailscale/github-action@v4
-        with:
-          authkey: ${{ secrets.TS_AUTHKEY }}
-          hostname: gh-dev-sync-${{ github.run_id }}
       - name: Ask the fleet deploy seat to deploy
         env:
-          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           DEPLOY_SEAT_HOST: ${{ secrets.DEPLOY_SEAT_HOST }}
           TARGET_HOST: paseo
           TARGET_STACKS: paseo-rosso-dev-sync
         run: |
           set -euo pipefail
-          install -d -m 0700 "$HOME/.ssh"
-          printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/deploy"
-          chmod 0600 "$HOME/.ssh/deploy"
           ssh -i "$HOME/.ssh/deploy" -p 32 \
             -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
             root@"$DEPLOY_SEAT_HOST" \

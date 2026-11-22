@@ -249,11 +249,10 @@ docker exec -e LOG=/dev/stdout rosso-dev-sync /usr/local/bin/sync.sh
 The stack is Ansible-owned on `paseo` as `paseo-rosso-dev-sync`, running
 `ghcr.io/tekkifox/rossmoney_me_live-to-dev-sync:latest`. This repository
 publishes that image but does not create or edit the stack. After every push to
-`main`, `.github/workflows/build.yml` builds and pushes the image, joins the
-tailnet with the `TS_AUTHKEY` repository secret, then uses the `DEPLOY_SSH_KEY`
-and `DEPLOY_SEAT_HOST` repository secrets to ask the fleet deploy seat to
-deploy `paseo-rosso-dev-sync` on `paseo`. The first push to `main` after this
-change is the proof that the deploy works.
+`main`, `.github/workflows/build.yml` builds and pushes the image, then a
+self-hosted runner uses the preinstalled deploy key at `$HOME/.ssh/deploy` to
+ask the fleet deploy seat (configured by the `DEPLOY_SEAT_HOST` repository
+secret) to deploy `paseo-rosso-dev-sync` on `paseo`.
 
 [`compose.deploy.yaml`](compose.deploy.yaml) is kept as the reference stack
 definition; CI no longer reads it. The stack's environment is maintained by the
