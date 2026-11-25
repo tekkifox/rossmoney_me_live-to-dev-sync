@@ -83,32 +83,45 @@ jobs:
           [ "$code" = 200 ]
 
   # The fleet's stacks are Ansible-managed files on disk. This job asks the
-  # deploy seat on mgmt to pull and recreate the stack over SSH from the
-  # self-hosted runner; the seat validates the host and stacks, refuses a stack
-  # the host does not declare, and prints the image id afterwards.
+  # deploy gateway to pull and recreate the stack over SSH from a GitHub-hosted
+  # runner that has joined the tailnet; the gateway validates the host and
+  # stacks and refuses a stack the host does not declare.
   #
   # This is deliberately self-contained rather than a call to the fleet's
   # reusable deploy-stack.yml: that workflow lives in the private
   # tekkifox/infrastructure-as-code repository, and GitHub does not let a public
   # repository call a reusable workflow in a private one. The duplicated lines
   # here are only transport, and the price of this repository being public.
-  # The seat address is a repo secret (DEPLOY_SEAT_HOST) so no real hostname is
-  # published here. The deploy key is preinstalled on the self-hosted runner at
-  # $HOME/.ssh/deploy.
   deploy:
     name: Deploy the dev sync
     needs: build
     if: github.ref == 'refs/heads/main'
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     steps:
-      - name: Ask the fleet deploy seat to deploy
+      - name: Join the tailnet
+        uses: tailscale/github-action@v4
+        with:
+          authkey: ${{ secrets.TS_AUTHKEY }}
+          hostname: gh-dev-sync-${{ github.run_id }}
+      - name: Install the gateway key and its pinned host key
         env:
-          DEPLOY_SEAT_HOST: ${{ secrets.DEPLOY_SEAT_HOST }}
-          TARGET_HOST: paseo
-          TARGET_STACKS: paseo-rosso-dev-sync
+          GATEWAY_KEY: ${{ secrets.DEPLOY_GATEWAY_SSH_KEY }}
+          GATEWAY_HOST_KEY: ${{ secrets.DEPLOY_GATEWAY_KNOWN_HOSTS }}
         run: |
           set -euo pipefail
-          ssh -i "$HOME/.ssh/deploy" -p 32 \
-            -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
-            root@"$DEPLOY_SEAT_HOST" \
-            "fleet-deploy $TARGET_HOST $TARGET_STACKS deploy"
+          install -d -m 0700 "$HOME/.ssh"
+          printf '%s\n' "$GATEWAY_KEY" > "$HOME/.ssh/gateway"
+          chmod 0600 "$HOME/.ssh/gateway"
+          printf '%s\n' "$GATEWAY_HOST_KEY" > "$HOME/.ssh/gateway_known_hosts"
+          chmod 0600 "$HOME/.ssh/gateway_known_hosts"
+
+      - name: Ask the deploy gateway to deploy
+        run: |
+          set -euo pipefail
+          ssh -i "$HOME/.ssh/gateway" \
+            -o IdentitiesOnly=yes -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/gateway_known_hosts" \
+            -o ConnectTimeout=30 \
+            deploy-hop@deploy-gateway.tail81cbd2.ts.net \
+            "deploy paseo paseo-rosso-dev-sync"
